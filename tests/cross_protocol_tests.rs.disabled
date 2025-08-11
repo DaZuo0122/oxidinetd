@@ -1,0 +1,251 @@
+use oxidinetd::config::{Config, Protocol};
+use std::fs;
+use std::io::Write;
+use std::net::SocketAddr;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
+
+// Helper function to create a temporary config file
+fn create_temp_config(content: &str) -> String {
+    let mut file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+    file.write_all(content.as_bytes())
+        .expect("Failed to write to temp file");
+    file.path().to_str().unwrap().to_string()
+}
+
+// Helper function to start a simple TCP echo server
+fn start_tcp_echo_server(port: u16) -> std::process::Child {
+    // This is a simple echo server implementation for testing
+    // In a real test, you might want to use a more robust implementation
+    Command::new("python")
+        .arg("-c")
+        .arg(format!(
+            r#"
+import socket
+import threading
+
+def handle_client(conn, addr):
+    try:
+        while True:
+            data = conn.recv(1024)
+            if not data:
+                break
+            conn.sendall(data)
+    except:
+        pass
+    finally:
+        conn.close()
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(('127.0.0.1', {}))
+sock.listen(5)
+
+try:
+    while True:
+        conn, addr = sock.accept()
+        thread = threading.Thread(target=handle_client, args=(conn, addr))
+        thread.daemon = True
+        thread.start()
+except KeyboardInterrupt:
+    pass
+finally:
+    sock.close()
+"#,
+            port
+        ))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("Failed to start TCP echo server")
+}
+
+// Helper function to start a simple UDP echo server
+fn start_udp_echo_server(port: u16) -> std::process::Child {
+    Command::new("python")
+        .arg("-c")
+        .arg(format!(
+            r#"
+import socket
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('127.0.0.1', {}))
+
+try:
+    while True:
+        data, addr = sock.recvfrom(1024)
+        if data:
+            sock.sendto(data, addr)
+except KeyboardInterrupt:
+    pass
+finally:
+    sock.close()
+"#,
+            port
+        ))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("Failed to start UDP echo server")
+}
+
+#[test]
+fn test_config_parsing_cross_protocol() {
+    let config_content = r#"
+[[forwarding_rules]]
+bind_address = "127.0.0.1"
+bind_port = 8080
+connect_address = "127.0.0.1"
+connect_port = 9090
+protocol = "udp_to_tcp"
+
+[[forwarding_rules]]
+bind_address = "127.0.0.1"
+bind_port = 8081
+connect_address = "127.0.0.1"
+connect_port = 9091
+protocol = "tcp_to_udp"
+"#;
+
+    let config_path = create_temp_config(config_content);
+    let config = Config::load_from_file(&config_path).expect("Failed to load config");
+
+    assert_eq!(config.forwarding_rules.len(), 2);
+    
+    let rule1 = &config.forwarding_rules[0];
+    assert_eq!(rule1.bind_address, "127.0.0.1");
+    assert_eq!(rule1.bind_port, 8080);
+    assert_eq!(rule1.connect_address, "127.0.0.1");
+    assert_eq!(rule1.connect_port, 9090);
+    match rule1.protocol {
+        Protocol::UdpToTcp => {}, // Correct
+        _ => panic!("Expected UdpToTcp protocol"),
+    }
+    
+    let rule2 = &config.forwarding_rules[1];
+    assert_eq!(rule2.bind_address, "127.0.0.1");
+    assert_eq!(rule2.bind_port, 8081);
+    assert_eq!(rule2.connect_address, "127.0.0.1");
+    assert_eq!(rule2.connect_port, 9091);
+    match rule2.protocol {
+        Protocol::TcpToUdp => {}, // Correct
+        _ => panic!("Expected TcpToUdp protocol"),
+    }
+}
+
+#[test]
+fn test_enum_serialization() {
+    // Test that our Protocol enum serializes and deserializes correctly
+    let protocols = vec![
+        (Protocol::Tcp, "tcp"),
+        (Protocol::Udp, "udp"),
+        (Protocol::UdpToTcp, "udp_to_tcp"),
+        (Protocol::TcpToUdp, "tcp_to_udp"),
+    ];
+    
+    for (protocol, expected) in protocols {
+        let serialized = toml::to_string(&protocol).expect("Failed to serialize protocol");
+        let trimmed = serialized.trim_matches('"');
+        assert_eq!(trimmed, expected);
+        
+        let deserialized: Protocol = toml::from_str(&format!("\"{}\"", expected))
+            .expect("Failed to deserialize protocol");
+        match (protocol, deserialized) {
+            (Protocol::Tcp, Protocol::Tcp) => {},
+            (Protocol::Udp, Protocol::Udp) => {},
+            (Protocol::UdpToTcp, Protocol::UdpToTcp) => {},
+            (Protocol::TcpToUdp, Protocol::TcpToUdp) => {},
+            _ => panic!("Protocol mismatch"),
+        }
+    }
+}
+
+// Note: Integration tests that require running the actual server are commented out
+// because they require external dependencies and proper setup. These would be
+// enabled in a full testing environment.
+
+// #[test]
+// fn test_udp_to_tcp_forwarding() {
+//     // Start a TCP echo server on port 9090
+//     let _tcp_server = start_tcp_echo_server(9090);
+//     thread::sleep(Duration::from_millis(100));
+//     
+//     // Create config for UDP-to-TCP forwarding
+//     let config_content = r#"
+//     [[forwarding_rules]]
+//     bind_address = "127.0.0.1"
+//     bind_port = 8080
+//     connect_address = "127.0.0.1"
+//     connect_port = 9090
+//     protocol = "udp_to_tcp"
+//     "#;
+//     
+//     let config_path = create_temp_config(config_content);
+//     
+//     // Start oxidinetd in a separate thread
+//     let config_path_clone = config_path.clone();
+//     let server_thread = thread::spawn(move || {
+//         let args = vec!["oi", "--config", &config_path_clone];
+//         oxidinetd::main();
+//     });
+//     
+//     thread::sleep(Duration::from_millis(500));
+//     
+//     // Send a UDP packet to the forwarding port
+//     let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+//     let target_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+//     let message = b"Hello, UDP-to-TCP!";
+//     socket.send_to(message, target_addr).unwrap();
+//     
+//     // Receive the echo response
+//     let mut buffer = [0; 1024];
+//     let (len, _) = socket.recv_from(&mut buffer).unwrap();
+//     assert_eq!(&buffer[..len], message);
+//     
+//     // Clean up
+//     drop(server_thread);
+//     drop(_tcp_server);
+// }
+
+// #[test]
+// fn test_tcp_to_udp_forwarding() {
+//     // Start a UDP echo server on port 9091
+//     let _udp_server = start_udp_echo_server(9091);
+//     thread::sleep(Duration::from_millis(100));
+//     
+//     // Create config for TCP-to-UDP forwarding
+//     let config_content = r#"
+//     [[forwarding_rules]]
+//     bind_address = "127.0.0.1"
+//     bind_port = 8081
+//     connect_address = "127.0.0.1"
+//     connect_port = 9091
+//     protocol = "tcp_to_udp"
+//     "#;
+//     
+//     let config_path = create_temp_config(config_content);
+//     
+//     // Start oxidinetd in a separate thread
+//     let config_path_clone = config_path.clone();
+//     let server_thread = thread::spawn(move || {
+//         let args = vec!["oi", "--config", &config_path_clone];
+//         oxidinetd::main();
+//     });
+//     
+//     thread::sleep(Duration::from_millis(500));
+//     
+//     // Connect to the TCP forwarding port and send data
+//     let mut stream = std::net::TcpStream::connect("127.0.0.1:8081").unwrap();
+//     let message = b"Hello, TCP-to-UDP!";
+//     stream.write_all(message).unwrap();
+//     
+//     // Read the echo response
+//     let mut buffer = [0; 1024];
+//     let len = stream.read(&mut buffer).unwrap();
+//     assert_eq!(&buffer[..len], message);
+//     
+//     // Clean up
+//     drop(server_thread);
+//     drop(_udp_server);
+// }
