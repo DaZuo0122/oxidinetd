@@ -40,10 +40,10 @@ cargo build --release
 
 ```bash
 # Basic usage
-./target/release/oi --config config.toml
+oi --config config.toml
 
 # With verbose output
-./target/release/oi --config config.toml --verbose
+oi --config config.toml --verbose
 ```
 
 ## Configuration
