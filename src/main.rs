@@ -1,11 +1,5 @@
-mod access_control;
-mod config;
-mod config_parser;
-mod tcp_handler;
-mod udp_handler;
-
-use crate::config::{Config, Protocol};
 use clap::Parser;
+use oxidinetd::config::{Config, Protocol};
 
 #[derive(Parser)]
 #[clap(name = "oxidinted", version = "0.1.0")]
@@ -77,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let task = smol::spawn(async move {
                         if let Err(e) =
-                            tcp_handler::start_tcp_forwarding(bind_socket_addr, connect_addr_clone, protocol_clone)
+                            oxidinetd::tcp_handler::start_tcp_forwarding(bind_socket_addr, connect_addr_clone, protocol_clone)
                                 .await
                         {
                             eprintln!("TCP forwarding error: {}", e);
@@ -97,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let task = smol::spawn(async move {
                         if let Err(e) =
-                            udp_handler::start_udp_forwarding(bind_socket_addr, connect_addr_clone, timeout, protocol_clone)
+                            oxidinetd::udp_handler::start_udp_forwarding(bind_socket_addr, connect_addr_clone, timeout, protocol_clone)
                                 .await
                         {
                             eprintln!("UDP forwarding error: {}", e);
@@ -123,4 +117,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn args_parse_config_short() {
+        let args = Args::parse_from(["oi", "-c", "proxy.toml"]);
+        assert_eq!(args.config, "proxy.toml");
+        assert!(!args.verbose);
+    }
+
+    #[test]
+    fn args_parse_config_long() {
+        let args = Args::parse_from(["oi", "--config", "proxy.toml"]);
+        assert_eq!(args.config, "proxy.toml");
+        assert!(!args.verbose);
+    }
+
+    #[test]
+    fn args_parse_verbose_short() {
+        let args = Args::parse_from(["oi", "-c", "proxy.toml", "-v"]);
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn args_parse_verbose_long() {
+        let args = Args::parse_from(["oi", "-c", "proxy.toml", "--verbose"]);
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn args_parse_combined() {
+        let args = Args::parse_from(["oi", "-c", "proxy.toml", "-v"]);
+        assert_eq!(args.config, "proxy.toml");
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn args_parse_verbose_without_config_errors() {
+        let err = Args::try_parse_from(["oi", "-v"]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn args_parse_missing_config_errors() {
+        let err = Args::try_parse_from(["oi"]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn args_parse_unknown_flag_errors() {
+        let err = Args::try_parse_from(["oi", "-c", "proxy.toml", "--bogus"]);
+        assert!(err.is_err());
+    }
 }
