@@ -51,7 +51,7 @@ fn test_enum_serialization() {
     
     for protocol_str in protocol_strings {
         let toml_str = format!(r#"protocol = "{}""#, protocol_str);
-        let config: serde_json::Value = toml::from_str(&toml_str)
+        let _config: serde_json::Value = toml::from_str(&toml_str)
             .expect("Failed to deserialize protocol");
         // Just verify it parses without error
     }
