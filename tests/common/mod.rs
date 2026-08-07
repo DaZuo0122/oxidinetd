@@ -53,10 +53,33 @@ impl TestProxy {
     }
 }
 
+/// Stops a proxy process. On Unix the proxy receives SIGINT first (its
+/// ctrlc handler runs and the process exits cleanly), which matters for
+/// coverage runs: profile data is only flushed on a normal exit, while
+/// SIGKILL loses it. Falls back to a hard kill.
+pub fn terminate_proxy(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .arg("-INT")
+            .arg(child.id().to_string())
+            .status();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = child.try_wait() {
+                let _ = child.wait();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 impl Drop for TestProxy {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        terminate_proxy(&mut self.child);
     }
 }
 
@@ -153,9 +176,8 @@ fn spawn_proxy_with_file(content: &str, file_name: &str) -> TestProxy {
             };
         }
 
-        // The port was taken by another concurrent test: kill and retry.
-        let _ = child.kill();
-        let _ = child.wait();
+        // The port was taken by another concurrent test: stop and retry.
+        terminate_proxy(&mut child);
         let new_port = random_proxy_port();
         config = rewrite_bind_port(&config, port, new_port);
         port = new_port;
