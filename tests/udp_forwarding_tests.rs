@@ -173,7 +173,7 @@ fn udp_bind_port_in_use() {
     let status = child.try_wait().expect("try_wait");
     assert!(status.is_none(), "proxy exited unexpectedly");
 
-    child.kill().unwrap();
+    terminate_proxy(&mut child);
     let output = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

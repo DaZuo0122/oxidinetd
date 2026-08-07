@@ -173,7 +173,7 @@ connect_port = {}
     std::thread::sleep(Duration::from_millis(800));
 
     let mut output = output;
-    output.kill().unwrap();
+    terminate_proxy(&mut output);
     let captured = output.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&captured.stdout);
     assert!(
@@ -204,6 +204,6 @@ fn no_rules_config_stays_alive() {
     std::thread::sleep(Duration::from_millis(800));
     assert!(child.try_wait().unwrap().is_none(), "proxy exited with zero rules");
 
-    child.kill().unwrap();
+    terminate_proxy(&mut child);
     let _ = child.wait();
 }
