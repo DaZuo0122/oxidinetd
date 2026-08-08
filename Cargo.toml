@@ -21,12 +21,34 @@ toml = "0.9.5"
 clap = { version = "4.5.43", features = ["derive"] }
 
 [dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
 rcgen = { version = "0.14.8", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2.2.0"
 serde_json = "1.0.151"
+socket2 = "0.6.5"
 tempfile = "3.27.0"
 test-case = "3.3.1"
 
 [target."cfg(windows)".dev-dependencies]
 winapi = { version = "0.3.9", features = ["winbase", "processthreadsapi", "handleapi", "wincon", "consoleapi", "errhandlingapi", "synchapi", "winnt"] }
+
+[[bench]]
+name = "tcp_throughput"
+harness = false
+
+[[bench]]
+name = "tcp_latency"
+harness = false
+
+[[bench]]
+name = "udp_throughput"
+harness = false
+
+[[bench]]
+name = "cross_protocol"
+harness = false
+
+[[bench]]
+name = "concurrent"
+harness = false

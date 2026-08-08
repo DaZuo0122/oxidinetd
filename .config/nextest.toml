@@ -1,0 +1,7 @@
+# Enable cargo nextest bench (experimental feature).
+# See https://nexte.st/book/features/benchmarks.html
+experimental = ["benchmarks"]
+
+[profile.default]
+# Benchmarks take longer than tests; give them generous timeouts.
+bench.global-timeout = "30m"
