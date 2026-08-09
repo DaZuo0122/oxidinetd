@@ -52,26 +52,26 @@ pub fn tune_group<M: criterion::measurement::Measurement>(
     group.measurement_time(Duration::from_secs(2));
 }
 
-/// Silences the process's stdout/stderr when output is piped (or
-/// `OI_BENCH_SILENT` is set explicitly).
+/// Silences the process's stdout/stderr by default.
 ///
 /// The library under test logs "New connection from ..." on stdout and
-/// "Connection error: ..." on stderr for every forwarded connection. When a
-/// benchmark harness (cargo-nextest) consumes the process output through
-/// pipes, thousands of these lines per benchmark can fill the pipe; the
-/// forwarder then blocks inside `println!`/`eprintln!`, which stalls the
-/// accept loop and the smol executor — benchmarks hang instead of measuring.
-/// Running under a terminal (cargo bench) keeps the normal console output,
-/// while piped runs (nextest, CI) are silenced. Benchmark results are always
-/// saved to `target/criterion` regardless.
+/// "Connection error: ..." on stderr for every forwarded connection. These
+/// lines would flood the benchmark process's output — and when the output is
+/// consumed through pipes (cargo-nextest, CI) thousands of lines per
+/// benchmark can fill the pipe, causing the forwarder to block inside
+/// `println!`/`eprintln!`, which stalls the accept loop and the smol
+/// executor — benchmarks hang instead of measuring. Output is therefore
+/// redirected to a null sink unless the `OI_BENCH_OUTPUT` flag is set.
+/// Benchmark results are always saved to `target/criterion` regardless.
 pub fn maybe_silence_output() {
     // The `--list` query must keep stdout: nextest parses the
     // "name: benchmark" lines from it.
     if std::env::args().any(|a| a == "--list") {
         return;
     }
-    let env_set = std::env::var_os("OI_BENCH_SILENT").is_some();
-    if !env_set && stdout_is_tty() {
+    // Printing is opt-in: set OI_BENCH_OUTPUT=1 to see the forwarder's logs
+    // and criterion's console output during a benchmark run.
+    if std::env::var_os("OI_BENCH_OUTPUT").is_some() {
         return;
     }
     #[cfg(unix)]
@@ -110,29 +110,6 @@ pub fn maybe_silence_output() {
             SetStdHandle(STD_OUTPUT_HANDLE, handle);
             SetStdHandle(STD_ERROR_HANDLE, handle);
         }
-    }
-}
-
-fn stdout_is_tty() -> bool {
-    if std::env::var_os("OI_BENCH_DEBUG_TTY").is_some() {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        unsafe { libc::isatty(1) == 1 }
-    }
-    #[cfg(windows)]
-    {
-        use winapi::um::consoleapi::GetConsoleMode;
-        use winapi::um::handleapi::INVALID_HANDLE_VALUE;
-        use winapi::um::processenv::GetStdHandle;
-        use winapi::um::winbase::STD_OUTPUT_HANDLE;
-        let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
-        if handle == INVALID_HANDLE_VALUE {
-            return false;
-        }
-        let mut mode: u32 = 0;
-        unsafe { GetConsoleMode(handle, &mut mode) != 0 }
     }
 }
 
