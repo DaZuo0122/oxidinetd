@@ -21,7 +21,7 @@ toml = "0.9.5"
 clap = { version = "4.5.43", features = ["derive"] }
 
 [dev-dependencies]
-criterion = { version = "0.8.2", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["async", "html_reports"] }
 rcgen = { version = "0.14.8", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2.2.0"
@@ -31,7 +31,10 @@ tempfile = "3.27.0"
 test-case = "3.3.1"
 
 [target."cfg(windows)".dev-dependencies]
-winapi = { version = "0.3.9", features = ["winbase", "processthreadsapi", "handleapi", "wincon", "consoleapi", "errhandlingapi", "synchapi", "winnt"] }
+winapi = { version = "0.3.9", features = ["winbase", "processthreadsapi", "handleapi", "wincon", "consoleapi", "errhandlingapi", "synchapi", "winnt", "processenv", "fileapi"] }
+
+[target."cfg(unix)".dev-dependencies]
+libc = "0.2.189"
 
 [[bench]]
 name = "tcp_throughput"
