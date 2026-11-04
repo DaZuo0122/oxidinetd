@@ -25,14 +25,12 @@ pub async fn handle_tcp_connection(
             let mut udp_buffer = vec![0; 65536];
 
             loop {
-                // Try to read from TCP client
-                match client_stream.peek(&mut tcp_buffer).await {
+                // Read each TCP chunk once before forwarding it as a UDP datagram.
+                match client_stream.read(&mut tcp_buffer).await {
                     Ok(0) => break, // Connection closed
                     Ok(n) => {
                         // Forward data to UDP server
                         udp_socket.send(&tcp_buffer[..n]).await?;
-                        // Consume the data we just peeked at
-                        let _ = client_stream.read(&mut tcp_buffer[..n]).await?;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         // No data available right now, continue
