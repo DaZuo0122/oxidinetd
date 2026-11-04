@@ -53,3 +53,7 @@ harness = false
 [[bench]]
 name = "concurrent"
 harness = false
+
+[[bench]]
+name = "tcp_diagnostics"
+harness = false

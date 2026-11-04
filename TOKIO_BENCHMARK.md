@@ -142,3 +142,53 @@ at `target/tokio-tcptoudp-ab.md`. Reproduce it with:
 ```powershell
 pwsh -File scripts/compare-benchmarks.ps1 14325d7 bc77001 tcptoudp.md tcptoudp
 ```
+
+## TCP bottleneck diagnosis (2026-11-05)
+
+The `tcp_diagnostics` benchmark runs the same Tokio client and echo server
+directly and through the current proxy. It measures fresh connections,
+sequential request/response on an established connection, and full-duplex
+bulk transfer. This controls for much of the client, backend and loopback
+cost that the original proxy-only benchmark includes.
+
+| Workload | Direct (µs) | Via proxy (µs) | Added time (µs) |
+| --- | ---: | ---: | ---: |
+| Fresh connection, 1 B echo | 167.6 | 1026.0 | 858.4 |
+| Fresh connection, 1 KiB echo | 184.6 | 1137.7 | 953.1 |
+| Fresh connection, 64 KiB echo | 1073.5 | 1802.1 | 728.6 |
+| Established connection, 1 B echo | 26.4 | 71.4 | 45.0 |
+| Established connection, 1 KiB echo | 27.2 | 61.4 | 34.2 |
+| Established connection, 64 KiB echo | 44.4 | 259.6 | 215.2 |
+| Full-duplex 1 MiB | 3548.8 | 4650.8 | 1102.0 |
+| Full-duplex 16 MiB | 28897.1 | 54740.9 | 25843.8 |
+
+Criterion means on Windows x86_64 with Rust 1.99.1; lower is faster. The
+roughly 0.9 ms added by the proxy for small fresh sessions falls to roughly
+35–45 µs when the connection is already established. This points to the
+accept/task/backend-connect path as the main short-session latency cost. The
+established 64 KiB and bulk results show a separate data-transfer cost that
+grows with payload size. The tests do not split that cost into socket I/O,
+runtime scheduling, and copying. Fresh and established cases use different
+measurement loops, so their difference is directional, not an exact timing of
+`TcpStream::connect`.
+
+An exploratory 64 KiB buffer for Tokio's bidirectional copy reduced the
+16 MiB proxy case from about 55 ms to 44–47 ms, and the established 64 KiB
+round trip from about 260–280 µs to 95 µs. The established 1 B case instead
+rose from about 65–71 µs to 82 µs. The default copy buffer remains in the
+implementation because this is a workload-dependent trade-off, and the small
+message result needs more repetitions. Single-case reruns confirmed the
+large-transfer direction; one multi-case rerun failed before completion.
+
+These are single-process, single-machine runs. The benchmark harness shares
+one Tokio runtime among client, backend and proxy. Its background listener
+threads are detached when their handles are dropped, so cases in the same
+process can leave idle listeners behind. Re-run isolated cases and repeat on
+other machines before treating small differences as regressions. The raw
+Criterion JSON is under `target/criterion/tcp_diagnostics_*` locally.
+Established-connection diagnostics close client sockets with RST to limit
+`TIME_WAIT` accumulation between Criterion samples.
+
+```powershell
+cargo bench --bench tcp_diagnostics -- --noplot
+```

@@ -196,7 +196,7 @@ pub fn spawn_forwarder(connect_addr: SocketAddr, protocol: Protocol) -> Forwarde
         if ready {
             return forwarder;
         }
-        drop(forwarder); // aborts the thread; retry with a new port
+        drop(forwarder); // detaches the thread; retry with a new port
     }
     panic!("could not start forwarder: bind port taken on every attempt");
 }
@@ -340,8 +340,7 @@ pub fn connect_rst(addr: SocketAddr) -> std::io::Result<TcpStream> {
 /// port is freed immediately.
 ///
 /// The session reads exactly `payload.len()` bytes instead of waiting for
-/// EOF: the forwarder's `io::copy` does not propagate a half-close to the
-/// backend, so EOF would never arrive on this path.
+/// EOF, keeping the measurement independent of connection teardown.
 pub async fn async_session(addr: SocketAddr, payload: &[u8]) {
     let mut stream = connect_rst(addr).expect("connect");
     stream.write_all(payload).await.expect("write");
