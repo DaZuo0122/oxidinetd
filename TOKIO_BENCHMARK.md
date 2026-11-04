@@ -85,7 +85,39 @@ bash scripts/compare-benchmarks.sh main HEAD comparison-tcp.md tcp_latency
 
 The scripts need Git and Cargo. They resolve each ref to a commit, discover
 benchmark binaries and cases from each version, and run every case in its own
-process. Each invocation creates temporary worktrees and a fresh temporary
-Cargo target directory; it never reads a previous Criterion result. The
+process. Each invocation creates temporary worktrees and a separate fresh Cargo
+target directory for each version; it never reads a previous Criterion result. The
 worktrees and temporary build data are removed after the report is written.
 Cases that exist in only one version are listed separately in the report.
+
+## Tokio TCP copy experiment (2026-11-05)
+
+The `copy_bidirectional` change in `c004d75` was compared with the preceding
+Tokio implementation in `bcd1e36`. The comparison ran all 11 TCP cases on
+Windows x86_64 with Rust 1.99.1. Each commit was compiled in its own fresh
+temporary target directory. Criterion mean times were:
+
+| Case | Before (µs) | After (µs) | Change |
+| --- | ---: | ---: | ---: |
+| Connection setup | 114.7 | 110.9 | -3.3% |
+| Latency 1 B | 1221.9 | 1356.0 | +11.0% |
+| Latency 100 B | 1227.6 | 1101.2 | -10.3% |
+| Latency 1 KiB | 1246.5 | 1266.9 | +1.6% |
+| Latency 4 KiB | 1416.3 | 1294.7 | -8.6% |
+| Latency 64 KiB | 1926.3 | 1844.9 | -4.2% |
+| Per connection 128 B | 1227.7 | 1226.3 | -0.1% |
+| Per connection 1 KiB | 1070.9 | 1253.4 | +17.0% |
+| Per connection 64 KiB | 1992.3 | 1818.1 | -8.7% |
+| Sustained 1 MiB | 4182.7 | 6523.1 | +56.0% |
+| Sustained 16 MiB | 63923.4 | 53099.5 | -16.9% |
+
+Lower is faster. Seven cases improved and four regressed. This single local
+run is mixed and does not establish an overall speedup. The base 1 KiB latency
+case failed once and succeeded on the helper's retry. The change also uses
+Tokio's half-close-aware bidirectional copy, which is covered by the new
+half-close integration test. The full generated report is available locally at
+`target/tokio-copy-ab-valid.md` and can be reproduced with:
+
+```powershell
+pwsh -File scripts/compare-benchmarks.ps1 bcd1e36 c004d75 tcp-copy.md tcp_
+```

@@ -251,7 +251,7 @@ fn report(
     writeln!(text, "- Cargo.lock in candidate commit: {candidate_locked}")?;
     writeln!(
         text,
-        "- Each case ran in a separate process. Both versions used one fresh temporary Cargo target directory and separate Criterion baseline names."
+        "- Each case ran in a separate process. Each version used its own fresh temporary Cargo target directory."
     )?;
     writeln!(text)?;
     writeln!(
@@ -346,7 +346,8 @@ fn run() -> Result<()> {
         .tempdir()?;
     let base_dir = temporary.path().join("base");
     let candidate_dir = temporary.path().join("candidate");
-    let target = temporary.path().join("target");
+    let base_target = temporary.path().join("base-target");
+    let candidate_target = temporary.path().join("candidate-target");
     let mut worktrees = Worktrees {
         repo,
         paths: Vec::new(),
@@ -355,11 +356,15 @@ fn run() -> Result<()> {
     worktrees.add(&candidate_dir, &candidate_commit)?;
     let base_locked = base_dir.join("Cargo.lock").is_file();
     let candidate_locked = candidate_dir.join("Cargo.lock").is_file();
-    eprintln!("Temporary build and result directory: {}", target.display());
-    let base_cases = run_version(&base_dir, &target, "base_ref", &filter)?;
-    let candidate_cases = run_version(&candidate_dir, &target, "candidate_ref", &filter)?;
-    let base = results(&target, "base_ref")?;
-    let candidate = results(&target, "candidate_ref")?;
+    eprintln!("Base build and result directory: {}", base_target.display());
+    eprintln!(
+        "Candidate build and result directory: {}",
+        candidate_target.display()
+    );
+    let base_cases = run_version(&base_dir, &base_target, "base_ref", &filter)?;
+    let candidate_cases = run_version(&candidate_dir, &candidate_target, "candidate_ref", &filter)?;
+    let base = results(&base_target, "base_ref")?;
+    let candidate = results(&candidate_target, "candidate_ref")?;
     let content = report(ReportInput {
         base_ref: &base_ref,
         candidate_ref: &candidate_ref,
