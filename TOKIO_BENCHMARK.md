@@ -121,3 +121,24 @@ half-close integration test. The full generated report is available locally at
 ```powershell
 pwsh -File scripts/compare-benchmarks.ps1 bcd1e36 c004d75 tcp-copy.md tcp_
 ```
+
+## Tokio TCP-to-UDP read experiment (2026-11-05)
+
+The handler in `bc77001` reads each TCP chunk once before sending the UDP
+datagram; `14325d7` first peeked and then read the same chunk. The existing
+cross-protocol integration suite passed all six tests. A separate-build A/B
+run of the three existing `tcptoudp` cases gave:
+
+| Payload | Before (µs) | After (µs) | Change |
+| --- | ---: | ---: | ---: |
+| 128 B | 367.7 | 364.5 | -0.9% |
+| 1 KiB | 367.7 | 353.5 | -3.9% |
+| 64 KB | 404.5 | 391.8 | -3.1% |
+
+Lower is faster. This is one local run, so the small differences need
+replication on other machines. The full generated report is available locally
+at `target/tokio-tcptoudp-ab.md`. Reproduce it with:
+
+```powershell
+pwsh -File scripts/compare-benchmarks.ps1 14325d7 bc77001 tcptoudp.md tcptoudp
+```
