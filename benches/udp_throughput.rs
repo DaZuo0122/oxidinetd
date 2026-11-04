@@ -1,7 +1,7 @@
 //! UDP forwarding throughput benchmarks.
 //!
-//! Runs the library's `start_udp_forwarding` in-process on a smol executor
-//! with an async smol UDP client. UDP is connectionless: the client reuses
+//! Runs the library's `start_udp_forwarding` in-process on a Tokio executor
+//! with an async Tokio UDP client. UDP is connectionless: the client reuses
 //! one socket across all iterations, while the forwarder creates a fresh
 //! ephemeral socket per datagram — that per-request socket allocation is the
 //! dominant forwarder cost being measured.
@@ -9,7 +9,7 @@
 mod common;
 
 use common::*;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use oxidinetd::config::Protocol;
 
 const DATAGRAM_SIZES: &[usize] = &[128, 1024, 8192, 64000];
@@ -26,11 +26,11 @@ fn bench_udp_throughput(c: &mut Criterion) {
             let forwarder = spawn_forwarder(echo.addr, Protocol::Udp);
             let addr = forwarder.bind_addr;
             let payload = payload.to_vec();
-            b.to_async(SmolExec).iter_custom(move |iters| {
+            b.to_async(TokioExec::new()).iter_custom(move |iters| {
                 let payload = payload.clone();
                 let addr = addr;
                 async move {
-                    let socket = smol::net::UdpSocket::bind("127.0.0.1:0")
+                    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
                         .await
                         .expect("bind client socket");
                     let start = std::time::Instant::now();

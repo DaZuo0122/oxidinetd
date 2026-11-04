@@ -1,7 +1,7 @@
 //! TCP forwarding throughput benchmarks.
 //!
-//! Runs the library's `start_tcp_forwarding` in-process on a smol executor
-//! and drives it with async smol clients — the same async stack the proxy is
+//! Runs the library's `start_tcp_forwarding` in-process on a Tokio executor
+//! and drives it with async Tokio clients — the same async stack the proxy is
 //! built on.
 //!
 //! Two measurement modes per payload size:
@@ -19,7 +19,7 @@
 mod common;
 
 use common::*;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use oxidinetd::config::Protocol;
 
 const PER_CONN_SIZES: &[usize] = &[128, 1024, 65536];
@@ -37,7 +37,7 @@ fn bench_per_connection(c: &mut Criterion) {
             let forwarder = spawn_forwarder(echo.addr, Protocol::Tcp);
             let addr = forwarder.bind_addr;
             let payload = payload.to_vec();
-            b.to_async(SmolExec).iter(move || {
+            b.to_async(TokioExec::new()).iter(move || {
                 let payload = payload.clone();
                 async move { async_session(addr, &payload).await }
             });
@@ -58,13 +58,11 @@ fn bench_sustained(c: &mut Criterion) {
             let forwarder = spawn_forwarder(echo.addr, Protocol::Tcp);
             let addr = forwarder.bind_addr;
             let payload = payload.to_vec();
-            b.to_async(SmolExec).iter_custom(move |iters| {
+            b.to_async(TokioExec::new()).iter_custom(move |iters| {
                 let payload = payload.clone();
                 let addr = addr;
                 async move {
-                    let mut stream = smol::net::TcpStream::connect(addr)
-                        .await
-                        .expect("connect");
+                    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
                     let start = std::time::Instant::now();
                     async_full_duplex(&mut stream, &payload, iters).await;
                     start.elapsed()

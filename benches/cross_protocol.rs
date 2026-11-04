@@ -9,7 +9,7 @@
 mod common;
 
 use common::*;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use oxidinetd::config::Protocol;
 
 const SMALL_SIZES: &[usize] = &[128, 1024];
@@ -27,7 +27,7 @@ fn bench_tcptoudp(c: &mut Criterion) {
             let forwarder = spawn_forwarder(echo.addr, Protocol::TcpToUdp);
             let addr = forwarder.bind_addr;
             let payload = payload.to_vec();
-            b.to_async(SmolExec).iter(move || {
+            b.to_async(TokioExec::new()).iter(move || {
                 let payload = payload.clone();
                 async move { async_session(addr, &payload).await }
             });
@@ -48,11 +48,11 @@ fn bench_udptotcp(c: &mut Criterion) {
             let forwarder = spawn_forwarder(echo.addr, Protocol::UdpToTcp);
             let addr = forwarder.bind_addr;
             let payload = payload.to_vec();
-            b.to_async(SmolExec).iter_custom(move |iters| {
+            b.to_async(TokioExec::new()).iter_custom(move |iters| {
                 let payload = payload.clone();
                 let addr = addr;
                 async move {
-                    let socket = smol::net::UdpSocket::bind("127.0.0.1:0")
+                    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
                         .await
                         .expect("bind client socket");
                     let start = std::time::Instant::now();

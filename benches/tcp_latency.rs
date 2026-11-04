@@ -7,7 +7,7 @@
 mod common;
 
 use common::*;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use oxidinetd::config::Protocol;
 
 const LATENCY_SIZES: &[usize] = &[1, 100, 1024, 4096, 65536];
@@ -23,7 +23,7 @@ fn bench_latency(c: &mut Criterion) {
             let forwarder = spawn_forwarder(echo.addr, Protocol::Tcp);
             let addr = forwarder.bind_addr;
             let payload = payload.to_vec();
-            b.to_async(SmolExec).iter(move || {
+            b.to_async(TokioExec::new()).iter(move || {
                 let payload = payload.clone();
                 async move { async_session(addr, &payload).await }
             });
@@ -45,7 +45,7 @@ fn bench_connection_rate(c: &mut Criterion) {
         let echo = spawn_echo_once_server();
         let forwarder = spawn_forwarder(echo.addr, Protocol::Tcp);
         let addr = forwarder.bind_addr;
-        b.to_async(SmolExec).iter_custom(move |iters| {
+        b.to_async(TokioExec::new()).iter_custom(move |iters| {
             let addr = addr;
             async move {
                 let start = std::time::Instant::now();

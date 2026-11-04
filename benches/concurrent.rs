@@ -14,7 +14,7 @@
 mod common;
 
 use common::*;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 
@@ -67,7 +67,11 @@ impl ConcurrentSuite {
             let error = error.clone();
             handles.push(std::thread::spawn(move || {
                 let payload = Arc::new(vec![0x33u8; PER_CLIENT_BYTES]);
-                let mut stream = match smol::block_on(smol::net::TcpStream::connect(addr)) {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                let mut stream = match runtime.block_on(tokio::net::TcpStream::connect(addr)) {
                     Ok(stream) => stream,
                     Err(e) => {
                         *error.lock().unwrap() = Some(format!("connect failed: {}", e));
@@ -85,7 +89,7 @@ impl ConcurrentSuite {
                     }
                     if error.lock().unwrap().is_none() {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            smol::block_on(async_full_duplex(&mut stream, &payload, 1));
+                            runtime.block_on(async_full_duplex(&mut stream, &payload, 1));
                         }));
                         if let Err(payload) = result {
                             let msg = if let Some(s) = payload.downcast_ref::<&str>() {

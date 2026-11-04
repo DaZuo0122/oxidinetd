@@ -2,8 +2,8 @@
 //!
 //! Unlike the earlier subprocess design, every benchmark runs the actual
 //! library forwarding functions (`start_tcp_forwarding`,
-//! `start_udp_forwarding`) in-process on a smol executor, and all clients
-//! and echo servers use async smol I/O — the same async stack the proxy
+//! `start_udp_forwarding`) in-process on a Tokio executor, and all clients
+//! and echo servers use async Tokio I/O — the same async stack the proxy
 //! itself is built on. This makes the benchmarks sensitive to changes in
 //! the library's network code paths (accept loops, handler tasks, `io::copy`
 //! in both directions, UDP connection tracking), which is exactly what a
@@ -24,20 +24,34 @@
 #![allow(dead_code)]
 
 use oxidinetd::config::Protocol;
-use smol::io::{AsyncReadExt, AsyncWriteExt};
-use smol::net::{TcpListener, TcpStream, UdpSocket};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
-pub use smol;
+fn bench_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+    })
+}
 
-/// Criterion's `AsyncExecutor` adapter, backed by the same smol runtime the
+/// Criterion's `AsyncExecutor` adapter, backed by the same Tokio runtime the
 /// library uses.
-pub struct SmolExec;
-impl criterion::async_executor::AsyncExecutor for SmolExec {
+pub struct TokioExec(&'static tokio::runtime::Runtime);
+impl TokioExec {
+    pub fn new() -> Self {
+        Self(bench_runtime())
+    }
+}
+impl criterion::async_executor::AsyncExecutor for TokioExec {
     fn block_on<T>(&self, future: impl std::future::Future<Output = T>) -> T {
-        smol::block_on(future)
+        self.0.block_on(future)
     }
 }
 
@@ -59,7 +73,7 @@ pub fn tune_group<M: criterion::measurement::Measurement>(
 /// lines would flood the benchmark process's output — and when the output is
 /// consumed through pipes (cargo-nextest, CI) thousands of lines per
 /// benchmark can fill the pipe, causing the forwarder to block inside
-/// `println!`/`eprintln!`, which stalls the accept loop and the smol
+/// `println!`/`eprintln!`, which stalls the accept loop and the Tokio
 /// executor — benchmarks hang instead of measuring. Output is therefore
 /// redirected to a null sink unless the `OI_BENCH_OUTPUT` flag is set.
 /// Benchmark results are always saved to `target/criterion` regardless.
@@ -132,9 +146,9 @@ pub fn random_port() -> u16 {
 
 // --- in-process forwarder ----------------------------------------------------
 
-/// Runs one of the library's forwarding functions in-process on a smol
+/// Runs one of the library's forwarding functions in-process on a Tokio
 /// executor thread, mirroring how the real binary starts them. The handler
-/// tasks spawned internally by the library run on smol's global executor
+/// tasks spawned internally by the library run on Tokio's runtime worker
 /// thread, exactly as in production.
 pub struct Forwarder {
     pub bind_addr: SocketAddr,
@@ -145,7 +159,7 @@ impl Forwarder {
     pub fn start(bind_addr: SocketAddr, connect_addr: SocketAddr, protocol: Protocol) -> Forwarder {
         let handle = std::thread::spawn(move || {
             let connect = connect_addr.to_string();
-            let _ = smol::block_on(async move {
+            let _ = bench_runtime().block_on(async move {
                 match protocol {
                     Protocol::Tcp | Protocol::TcpToUdp => {
                         oxidinetd::tcp_handler::start_tcp_forwarding(bind_addr, connect, protocol)
@@ -153,10 +167,7 @@ impl Forwarder {
                     }
                     Protocol::Udp | Protocol::UdpToTcp => {
                         oxidinetd::udp_handler::start_udp_forwarding(
-                            bind_addr,
-                            connect,
-                            None,
-                            protocol,
+                            bind_addr, connect, None, protocol,
                         )
                         .await
                     }
@@ -215,13 +226,16 @@ pub fn spawn_echo_once_server() -> EchoOnceServer {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind echo server");
     let addr = listener.local_addr().unwrap();
     let handle = std::thread::spawn(move || {
-        smol::block_on(async move {
-            let listener = TcpListener::from(smol::Async::new(listener).expect("async listener"));
+        bench_runtime().block_on(async move {
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let listener = TcpListener::from_std(listener).expect("async listener");
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     continue;
                 };
-                smol::spawn(echo_until_closed(stream)).detach();
+                tokio::spawn(echo_until_closed(stream));
             }
         });
     });
@@ -242,13 +256,16 @@ pub fn spawn_echo_server() -> EchoServer {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind echo server");
     let addr = listener.local_addr().unwrap();
     let handle = std::thread::spawn(move || {
-        smol::block_on(async move {
-            let listener = TcpListener::from(smol::Async::new(listener).expect("async listener"));
+        bench_runtime().block_on(async move {
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let listener = TcpListener::from_std(listener).expect("async listener");
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     continue;
                 };
-                smol::spawn(echo_until_closed(stream)).detach();
+                tokio::spawn(echo_until_closed(stream));
             }
         });
     });
@@ -281,8 +298,11 @@ pub fn spawn_udp_echo_server() -> UdpEchoServer {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind udp echo server");
     let addr = socket.local_addr().unwrap();
     let handle = std::thread::spawn(move || {
-        smol::block_on(async move {
-            let socket = UdpSocket::from(smol::Async::new(socket).expect("async udp socket"));
+        bench_runtime().block_on(async move {
+            socket
+                .set_nonblocking(true)
+                .expect("nonblocking udp socket");
+            let socket = UdpSocket::from_std(socket).expect("async udp socket");
             let mut buf = vec![0u8; 65536];
             loop {
                 match socket.recv_from(&mut buf).await {
@@ -311,8 +331,8 @@ pub fn connect_rst(addr: SocketAddr) -> std::io::Result<TcpStream> {
     socket.set_linger(Some(Duration::ZERO))?;
     socket.connect(&addr.into())?;
     let stream: std::net::TcpStream = socket.into();
-    let stream = smol::Async::new(stream)?;
-    Ok(TcpStream::from(stream))
+    stream.set_nonblocking(true)?;
+    TcpStream::from_std(stream)
 }
 
 /// One complete per-connection session through the forwarder: connect, write
@@ -331,23 +351,16 @@ pub async fn async_session(addr: SocketAddr, payload: &[u8]) {
         // Guard against stalls: if the echo never arrives (e.g. the
         // forwarder's executor is wedged), fail loudly instead of hanging
         // the benchmark process forever.
-        let n = smol::future::or(
-            stream.read(&mut buf),
-            async {
-                smol::Timer::after(Duration::from_secs(10)).await;
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "session stalled waiting for the echo",
-                ))
-            },
-        )
-        .await
-        .expect("read");
+        let n = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buf))
+            .await
+            .expect("session stalled waiting for the echo")
+            .expect("read");
         assert!(n > 0, "connection closed before the full echo arrived");
         received += n;
     }
     assert_eq!(
-        received, payload.len(),
+        received,
+        payload.len(),
         "echo size mismatch: expected {}, got {}",
         payload.len(),
         received
@@ -358,10 +371,10 @@ pub async fn async_session(addr: SocketAddr, payload: &[u8]) {
 /// Runs `iters` write+read echo cycles on a persistent connection in full
 /// duplex: a writer future streams the payload while the reader drains the
 /// echo. No threads involved — both futures share the connection via a
-/// cheap Arc clone of the stream.
+/// split read and write halves of the stream.
 pub async fn async_full_duplex(stream: &mut TcpStream, payload: &[u8], iters: u64) {
     let total_bytes = iters * payload.len() as u64;
-    let mut writer_stream = stream.clone();
+    let (mut reader_stream, mut writer_stream) = stream.split();
     let write = async move {
         for _ in 0..iters {
             writer_stream.write_all(payload).await?;
@@ -372,7 +385,7 @@ pub async fn async_full_duplex(stream: &mut TcpStream, payload: &[u8], iters: u6
         let mut buf = vec![0u8; 65536];
         let mut received = 0u64;
         while received < total_bytes {
-            let n = stream.read(&mut buf).await?;
+            let n = reader_stream.read(&mut buf).await?;
             if n == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -383,7 +396,7 @@ pub async fn async_full_duplex(stream: &mut TcpStream, payload: &[u8], iters: u6
         }
         Ok::<(), std::io::Error>(())
     };
-    smol::future::try_zip(write, read).await.expect("full-duplex echo");
+    tokio::try_join!(write, read).expect("full-duplex echo");
 }
 
 /// One datagram round trip on a persistent async UDP socket. A stall guard
@@ -392,18 +405,10 @@ pub async fn async_full_duplex(stream: &mut TcpStream, payload: &[u8], iters: u6
 pub async fn async_udp_round_trip(socket: &UdpSocket, addr: SocketAddr, payload: &[u8]) {
     socket.send_to(payload, addr).await.expect("send datagram");
     let mut buf = vec![0u8; 65536];
-    let n = smol::future::or(
-        socket.recv_from(&mut buf),
-        async {
-            smol::Timer::after(Duration::from_secs(10)).await;
-            Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "datagram round trip stalled waiting for a response",
-            ))
-        },
-    )
-    .await
-    .expect("receive response");
+    let n = tokio::time::timeout(Duration::from_secs(10), socket.recv_from(&mut buf))
+        .await
+        .expect("datagram round trip stalled waiting for a response")
+        .expect("receive response");
     let (n, _) = n;
     assert_eq!(n, payload.len(), "echo size mismatch");
 }

@@ -32,12 +32,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loaded {} forwarding rules", config.forwarding_rules.len());
 
     // Run the async runtime
-    match smol::block_on(async {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    match runtime.block_on(async {
         // Create a vector to hold our tasks
         let mut tasks = Vec::new();
 
         // Set up signal handler for graceful shutdown
-        let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel(1);
         let shutdown_tx_clone = shutdown_tx.clone();
 
         ctrlc::set_handler(move || {
@@ -69,10 +72,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let connect_addr_clone = connect_addr.clone();
                     let protocol_clone = rule.protocol.clone();
 
-                    let task = smol::spawn(async move {
-                        if let Err(e) =
-                            oxidinetd::tcp_handler::start_tcp_forwarding(bind_socket_addr, connect_addr_clone, protocol_clone)
-                                .await
+                    let task = tokio::spawn(async move {
+                        if let Err(e) = oxidinetd::tcp_handler::start_tcp_forwarding(
+                            bind_socket_addr,
+                            connect_addr_clone,
+                            protocol_clone,
+                        )
+                        .await
                         {
                             eprintln!("TCP forwarding error: {}", e);
                         }
@@ -89,10 +95,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let timeout = rule.timeout;
                     let protocol_clone = rule.protocol.clone();
 
-                    let task = smol::spawn(async move {
-                        if let Err(e) =
-                            oxidinetd::udp_handler::start_udp_forwarding(bind_socket_addr, connect_addr_clone, timeout, protocol_clone)
-                                .await
+                    let task = tokio::spawn(async move {
+                        if let Err(e) = oxidinetd::udp_handler::start_udp_forwarding(
+                            bind_socket_addr,
+                            connect_addr_clone,
+                            timeout,
+                            protocol_clone,
+                        )
+                        .await
                         {
                             eprintln!("UDP forwarding error: {}", e);
                         }

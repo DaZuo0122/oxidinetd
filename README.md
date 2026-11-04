@@ -185,4 +185,4 @@ This project is licensed under the GPL-2.0 License - see the [LICENSE](LICENSE) 
 ## Acknowledgments
 
 - Inspired by [rinetd](https://github.com/samhocevar/rinetd), a popular port forwarding utility
-- Built with [Smol](https://github.com/smol-rs/smol), a simple async runtime for Rust
+- Built with [Tokio](https://tokio.rs/), an async runtime for Rust
