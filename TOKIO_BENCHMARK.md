@@ -62,3 +62,30 @@ To reproduce an individual result, run, for example:
 cargo bench --bench tcp_latency -- 'tcp_latency/round_trip/1024' --noplot
 cargo bench --bench tcp_throughput -- 'tcp_throughput/sustained' --noplot
 ```
+
+## Re-run the comparison on another machine
+
+Both entry points accept the same positional arguments:
+
+`BASE_REF CANDIDATE_REF [OUTPUT.md] [NAME_FILTER]`
+
+They default to `main` and `HEAD`. An empty output argument creates a uniquely
+named report in the current directory. The optional fourth argument selects
+benchmark names containing that text.
+
+```powershell
+pwsh -File scripts/compare-benchmarks.ps1 main HEAD comparison.md
+pwsh -File scripts/compare-benchmarks.ps1 main HEAD comparison-tcp.md tcp_latency
+```
+
+```bash
+bash scripts/compare-benchmarks.sh main HEAD comparison.md
+bash scripts/compare-benchmarks.sh main HEAD comparison-tcp.md tcp_latency
+```
+
+The scripts need Git and Cargo. They resolve each ref to a commit, discover
+benchmark binaries and cases from each version, and run every case in its own
+process. Each invocation creates temporary worktrees and a fresh temporary
+Cargo target directory; it never reads a previous Criterion result. The
+worktrees and temporary build data are removed after the report is written.
+Cases that exist in only one version are listed separately in the report.

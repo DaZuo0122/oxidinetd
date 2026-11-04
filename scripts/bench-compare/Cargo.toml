@@ -1,0 +1,9 @@
+[package]
+name = "oxidinetd-bench-compare"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+serde_json = "1"
+tempfile = "3"
