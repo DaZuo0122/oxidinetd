@@ -2,7 +2,7 @@ mod common;
 
 use common::*;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::time::Duration;
 
 fn tcp_proxy_config(bind_port: u16, connect_port: u16) -> String {
@@ -29,6 +29,40 @@ fn tcp_basic_forward() {
     let response = tcp_round_trip(proxy.bind_addr, b"hello world");
     assert_eq!(response, b"hello world");
 
+    assert!(proxy.is_alive());
+}
+
+#[test]
+fn tcp_half_close_reaches_backend() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind backend");
+    let backend_port = listener.local_addr().unwrap().port();
+    let backend = std::thread::spawn(move || {
+        loop {
+            let (mut stream, _) = listener.accept().expect("accept backend connection");
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("read request to EOF");
+            if request.is_empty() {
+                continue; // The proxy's readiness probe opens and closes a connection.
+            }
+            assert_eq!(request, b"request");
+            stream.write_all(b"response").expect("write response");
+            break;
+        }
+    });
+
+    let port = reserve_proxy_port();
+    let mut proxy = spawn_proxy(&tcp_proxy_config(port, backend_port));
+    assert!(wait_for_port(proxy.bind_addr, Duration::from_secs(10)));
+
+    let mut client = TcpStream::connect(proxy.bind_addr).expect("connect to proxy");
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    client.write_all(b"request").expect("write request");
+    client.shutdown(Shutdown::Write).expect("half-close request");
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).expect("read response to EOF");
+    assert_eq!(response, b"response");
+    backend.join().expect("backend thread");
     assert!(proxy.is_alive());
 }
 

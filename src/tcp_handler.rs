@@ -12,12 +12,7 @@ pub async fn handle_tcp_connection(
         crate::config::Protocol::Tcp => {
             let mut server_stream = TcpStream::connect(&server_addr).await?;
 
-            let (mut client_read, mut client_write) = client_stream.split();
-            let (mut server_read, mut server_write) = server_stream.split();
-            tokio::try_join!(
-                io::copy(&mut client_read, &mut server_write),
-                io::copy(&mut server_read, &mut client_write)
-            )?;
+            io::copy_bidirectional(&mut client_stream, &mut server_stream).await?;
         }
         crate::config::Protocol::TcpToUdp => {
             // Create a UDP socket for forwarding
