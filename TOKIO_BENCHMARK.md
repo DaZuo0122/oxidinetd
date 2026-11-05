@@ -164,8 +164,9 @@ cost that the original proxy-only benchmark includes.
 
 Criterion means on Windows x86_64 with Rust 1.99.1; lower is faster. The
 roughly 0.9 ms added by the proxy for small fresh sessions falls to roughly
-35–45 µs when the connection is already established. This points to the
-accept/task/backend-connect path as the main short-session latency cost. The
+35–45 µs when the connection is already established. This locates much of
+the short-session cost in the fresh-connection path, but does not distinguish
+backend connection, task scheduling, and measurement outliers. The
 established 64 KiB and bulk results show a separate data-transfer cost that
 grows with payload size. The tests do not split that cost into socket I/O,
 runtime scheduling, and copying. Fresh and established cases use different
@@ -181,10 +182,12 @@ message result needs more repetitions. Single-case reruns confirmed the
 large-transfer direction; one multi-case rerun failed before completion.
 
 These are single-process, single-machine runs. The benchmark harness shares
-one Tokio runtime among client, backend and proxy. Its background listener
-threads are detached when their handles are dropped, so cases in the same
-process can leave idle listeners behind. Re-run isolated cases and repeat on
-other machines before treating small differences as regressions. The raw
+one Tokio runtime among client, backend and proxy. The listener fixtures now
+stop and join their threads when dropped; earlier measurements in this section
+predate that fixture fix. The complete `tcp_diagnostics` benchmark finished
+successfully after the cleanup change, as did isolated TCP latency, UDP
+throughput, and TCP-to-UDP cases. Re-run isolated cases and repeat on other machines
+before treating small differences as regressions. The raw
 Criterion JSON is under `target/criterion/tcp_diagnostics_*` locally.
 Established-connection diagnostics close client sockets with RST to limit
 `TIME_WAIT` accumulation between Criterion samples.
@@ -192,3 +195,41 @@ Established-connection diagnostics close client sockets with RST to limit
 ```powershell
 cargo bench --bench tcp_diagnostics -- --noplot
 ```
+
+## TCP connection-stage probe (2026-11-05)
+
+`examples/tcp_stages.rs` uses the actual TCP forwarder, an echo backend, and
+paired direct connections. Each sample records client connect completion,
+backend accept, backend request read, and client response completion. Results
+below are 400 alternating direct/proxy sessions with 1 KiB requests on Windows
+x86_64; proxy stdout was redirected to a null sink.
+
+| Stage, synchronous client connect | Direct p50 / p99 (µs) | Proxy p50 / p99 (µs) |
+| --- | ---: | ---: |
+| Client connect | 123 / 365 | 122 / 350 |
+| Backend accept from start | 150 / 422 | 312 / 742 |
+| Client connect to backend request read | 63 / 179 | 228 / 18091 |
+| Complete round trip | 230 / 532 | 413 / 18340 |
+
+The typical proxy round trip added about 183 µs in this probe, much less than
+the earlier Criterion mean difference. The backend accepted almost all proxy
+connections within 1 ms, while the long tail appeared after the client
+connected and before the backend read the request. This does **not** prove
+whether the delay is in socket notification, the proxy task, or the OS
+scheduler; an event trace inside the proxy or OS networking stack is needed.
+
+Using async Tokio client connect in the same probe produced 15–20 ms p99
+connect delays in both direct and proxy paths. A single-thread Tokio runtime
+made roughly one third of direct and proxy samples incur about 15 ms in the
+connect stage. An exploratory `TCP_NODELAY` change on both proxy sockets did
+not remove the proxy request-delivery tail, so that change was reverted.
+These are short local runs and tail frequencies varied between runs.
+
+```powershell
+cargo run --release --example tcp_stages -- 400 1024 sync > $null
+cargo run --release --example tcp_stages -- 400 1024 async > $null
+```
+
+The tool prints stage summaries to stderr. On Bash, redirect stdout to
+`/dev/null` instead of `$null` to keep per-connection proxy logs out of the
+measurement output.

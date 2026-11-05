@@ -24,9 +24,10 @@
 #![allow(dead_code)]
 
 use oxidinetd::config::Protocol;
+use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -146,37 +147,70 @@ pub fn random_port() -> u16 {
 
 // --- in-process forwarder ----------------------------------------------------
 
+struct Background {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Background {
+    fn spawn<F, Fut>(run: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let handle = std::thread::spawn(move || {
+            bench_runtime().block_on(async move {
+                tokio::select! {
+                    _ = run() => {},
+                    _ = stopped => {},
+                }
+            });
+        });
+        Self {
+            stop: Some(stop),
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("background benchmark thread panicked");
+        }
+    }
+}
+
 /// Runs one of the library's forwarding functions in-process on a Tokio
 /// executor thread, mirroring how the real binary starts them. The handler
 /// tasks spawned internally by the library run on Tokio's runtime worker
 /// thread, exactly as in production.
 pub struct Forwarder {
     pub bind_addr: SocketAddr,
-    _handle: std::thread::JoinHandle<()>,
+    _background: Background,
 }
 
 impl Forwarder {
     pub fn start(bind_addr: SocketAddr, connect_addr: SocketAddr, protocol: Protocol) -> Forwarder {
-        let handle = std::thread::spawn(move || {
+        let background = Background::spawn(move || async move {
             let connect = connect_addr.to_string();
-            let _ = bench_runtime().block_on(async move {
-                match protocol {
-                    Protocol::Tcp | Protocol::TcpToUdp => {
-                        oxidinetd::tcp_handler::start_tcp_forwarding(bind_addr, connect, protocol)
-                            .await
-                    }
-                    Protocol::Udp | Protocol::UdpToTcp => {
-                        oxidinetd::udp_handler::start_udp_forwarding(
-                            bind_addr, connect, None, protocol,
-                        )
-                        .await
-                    }
+            let _ = match protocol {
+                Protocol::Tcp | Protocol::TcpToUdp => {
+                    oxidinetd::tcp_handler::start_tcp_forwarding(bind_addr, connect, protocol).await
                 }
-            });
+                Protocol::Udp | Protocol::UdpToTcp => {
+                    oxidinetd::udp_handler::start_udp_forwarding(bind_addr, connect, None, protocol)
+                        .await
+                }
+            };
         });
         Forwarder {
             bind_addr,
-            _handle: handle,
+            _background: background,
         }
     }
 }
@@ -196,7 +230,7 @@ pub fn spawn_forwarder(connect_addr: SocketAddr, protocol: Protocol) -> Forwarde
         if ready {
             return forwarder;
         }
-        drop(forwarder); // detaches the thread; retry with a new port
+        drop(forwarder); // stop the listener before retrying with a new port
     }
     panic!("could not start forwarder: bind port taken on every attempt");
 }
@@ -216,7 +250,7 @@ pub fn wait_for_port(addr: SocketAddr, timeout: Duration) -> bool {
 
 pub struct EchoOnceServer {
     pub addr: SocketAddr,
-    _handle: std::thread::JoinHandle<()>,
+    _background: Background,
 }
 
 /// Async TCP echo server that closes the connection after echoing. Used by
@@ -225,29 +259,27 @@ pub struct EchoOnceServer {
 pub fn spawn_echo_once_server() -> EchoOnceServer {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind echo server");
     let addr = listener.local_addr().unwrap();
-    let handle = std::thread::spawn(move || {
-        bench_runtime().block_on(async move {
-            listener
-                .set_nonblocking(true)
-                .expect("nonblocking listener");
-            let listener = TcpListener::from_std(listener).expect("async listener");
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    continue;
-                };
-                tokio::spawn(echo_until_closed(stream));
-            }
-        });
+    let background = Background::spawn(move || async move {
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let listener = TcpListener::from_std(listener).expect("async listener");
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            tokio::spawn(echo_until_closed(stream));
+        }
     });
     EchoOnceServer {
         addr,
-        _handle: handle,
+        _background: background,
     }
 }
 
 pub struct EchoServer {
     pub addr: SocketAddr,
-    _handle: std::thread::JoinHandle<()>,
+    _background: Background,
 }
 
 /// Async TCP echo server that keeps connections open until EOF. Used by
@@ -255,23 +287,21 @@ pub struct EchoServer {
 pub fn spawn_echo_server() -> EchoServer {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind echo server");
     let addr = listener.local_addr().unwrap();
-    let handle = std::thread::spawn(move || {
-        bench_runtime().block_on(async move {
-            listener
-                .set_nonblocking(true)
-                .expect("nonblocking listener");
-            let listener = TcpListener::from_std(listener).expect("async listener");
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    continue;
-                };
-                tokio::spawn(echo_until_closed(stream));
-            }
-        });
+    let background = Background::spawn(move || async move {
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let listener = TcpListener::from_std(listener).expect("async listener");
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            tokio::spawn(echo_until_closed(stream));
+        }
     });
     EchoServer {
         addr,
-        _handle: handle,
+        _background: background,
     }
 }
 
@@ -291,32 +321,25 @@ async fn echo_until_closed(mut stream: TcpStream) {
 
 pub struct UdpEchoServer {
     pub addr: SocketAddr,
-    _handle: std::thread::JoinHandle<()>,
+    _background: Background,
 }
 
 pub fn spawn_udp_echo_server() -> UdpEchoServer {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind udp echo server");
     let addr = socket.local_addr().unwrap();
-    let handle = std::thread::spawn(move || {
-        bench_runtime().block_on(async move {
-            socket
-                .set_nonblocking(true)
-                .expect("nonblocking udp socket");
-            let socket = UdpSocket::from_std(socket).expect("async udp socket");
-            let mut buf = vec![0u8; 65536];
-            loop {
-                match socket.recv_from(&mut buf).await {
-                    Ok((len, src)) => {
-                        let _ = socket.send_to(&buf[..len], src).await;
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+    let background = Background::spawn(move || async move {
+        socket
+            .set_nonblocking(true)
+            .expect("nonblocking udp socket");
+        let socket = UdpSocket::from_std(socket).expect("async udp socket");
+        let mut buf = vec![0u8; 65536];
+        while let Ok((len, src)) = socket.recv_from(&mut buf).await {
+            let _ = socket.send_to(&buf[..len], src).await;
+        }
     });
     UdpEchoServer {
         addr,
-        _handle: handle,
+        _background: background,
     }
 }
 

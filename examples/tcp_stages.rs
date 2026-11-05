@@ -1,0 +1,197 @@
+//! Stage timings for direct and proxied TCP echo sessions.
+//! Run with: cargo run --release --example tcp_stages -- [SAMPLES] [BYTES] [async|sync]
+
+use std::error::Error;
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+
+type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
+
+struct BackendEvent {
+    id: u64,
+    accepted: Instant,
+    request_read: Instant,
+    response_written: Instant,
+}
+
+#[derive(Default)]
+struct Timings {
+    client_connect: Vec<u64>,
+    backend_accept: Vec<u64>,
+    request_delivery: Vec<u64>,
+    response_delivery: Vec<u64>,
+    total: Vec<u64>,
+}
+
+impl Timings {
+    fn add(&mut self, start: Instant, connected: Instant, finished: Instant, event: BackendEvent) {
+        self.client_connect.push(us(start, connected));
+        self.backend_accept.push(us(start, event.accepted));
+        self.request_delivery
+            .push(us(connected, event.request_read));
+        self.response_delivery
+            .push(us(event.response_written, finished));
+        self.total.push(us(start, finished));
+    }
+
+    fn print(&mut self, label: &str) {
+        eprintln!("{label}:");
+        for (name, data) in [
+            ("client connect", &mut self.client_connect),
+            ("backend accept from start", &mut self.backend_accept),
+            ("client connect to backend read", &mut self.request_delivery),
+            ("backend write to client read", &mut self.response_delivery),
+            ("complete round trip", &mut self.total),
+        ] {
+            data.sort_unstable();
+            let p50 = data[data.len() / 2];
+            let p95 = data[(data.len() * 95 / 100).min(data.len() - 1)];
+            let p99 = data[(data.len() * 99 / 100).min(data.len() - 1)];
+            let above_1ms = data.iter().filter(|&&v| v > 1000).count();
+            eprintln!("  {name}: p50 {p50} µs, p95 {p95} µs, p99 {p99} µs, >1 ms {above_1ms}");
+        }
+    }
+}
+
+fn us(start: Instant, end: Instant) -> u64 {
+    end.saturating_duration_since(start).as_micros() as u64
+}
+
+async fn backend(listener: TcpListener, bytes: usize, events: mpsc::UnboundedSender<BackendEvent>) {
+    loop {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            break;
+        };
+        let accepted = Instant::now();
+        let events = events.clone();
+        tokio::spawn(async move {
+            let mut payload = vec![0; bytes];
+            if stream.read_exact(&mut payload).await.is_err() {
+                return; // readiness probe or disconnected client
+            }
+            let request_read = Instant::now();
+            let id = u64::from_le_bytes(payload[..8].try_into().expect("sequence number"));
+            if stream.write_all(&payload).await.is_err() {
+                return;
+            }
+            let response_written = Instant::now();
+            let _ = events.send(BackendEvent {
+                id,
+                accepted,
+                request_read,
+                response_written,
+            });
+        });
+    }
+}
+
+async fn session(
+    addr: SocketAddr,
+    id: u64,
+    bytes: usize,
+    sync_connect: bool,
+    events: &mut mpsc::UnboundedReceiver<BackendEvent>,
+) -> Result<(Instant, Instant, Instant, BackendEvent)> {
+    let mut payload = vec![0x42; bytes];
+    payload[..8].copy_from_slice(&id.to_le_bytes());
+    let start = Instant::now();
+    let mut client = if sync_connect {
+        connect_sync(addr)?
+    } else {
+        TcpStream::connect(addr).await?
+    };
+    let connected = Instant::now();
+    client.write_all(&payload).await?;
+    let mut response = vec![0; bytes];
+    tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut response)).await??;
+    let finished = Instant::now();
+    if response != payload {
+        return Err("echo mismatch".into());
+    }
+    let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await?
+        .ok_or("backend event channel closed")?;
+    if event.id != id {
+        return Err(format!("backend event mismatch: expected {id}, got {}", event.id).into());
+    }
+    Ok((start, connected, finished, event))
+}
+
+fn connect_sync(addr: SocketAddr) -> std::io::Result<TcpStream> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    socket.connect(&addr.into())?;
+    let stream: std::net::TcpStream = socket.into();
+    stream.set_nonblocking(true)?;
+    TcpStream::from_std(stream)
+}
+
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> Result<()> {
+    let mut args = std::env::args().skip(1);
+    let samples: usize = args.next().unwrap_or_else(|| "200".into()).parse()?;
+    let bytes: usize = args.next().unwrap_or_else(|| "8".into()).parse()?;
+    let connect_mode = args.next().unwrap_or_else(|| "async".into());
+    if samples == 0
+        || bytes < 8
+        || !["async", "sync"].contains(&connect_mode.as_str())
+        || args.next().is_some()
+    {
+        return Err("usage: tcp_stages [SAMPLES>0] [BYTES>=8] [async|sync]".into());
+    }
+    let sync_connect = connect_mode == "sync";
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let backend_addr = listener.local_addr()?;
+    let (sender, mut events) = mpsc::unbounded_channel();
+    let backend_task = tokio::spawn(backend(listener, bytes, sender));
+
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let proxy_addr = reservation.local_addr()?;
+    drop(reservation);
+    let proxy_task = tokio::spawn(async move {
+        let _ = oxidinetd::tcp_handler::start_tcp_forwarding(
+            proxy_addr,
+            backend_addr.to_string(),
+            oxidinetd::config::Protocol::Tcp,
+        )
+        .await;
+    });
+    for _ in 0..100 {
+        if TcpStream::connect(proxy_addr).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let mut direct = Timings::default();
+    let mut proxied = Timings::default();
+    for i in 0..samples {
+        let paths = if i % 2 == 0 {
+            [
+                (backend_addr, &mut direct, (i as u64) * 2),
+                (proxy_addr, &mut proxied, (i as u64) * 2 + 1),
+            ]
+        } else {
+            [
+                (proxy_addr, &mut proxied, (i as u64) * 2 + 1),
+                (backend_addr, &mut direct, (i as u64) * 2),
+            ]
+        };
+        for (addr, timings, id) in paths {
+            let (start, connected, finished, event) =
+                session(addr, id, bytes, sync_connect, &mut events).await?;
+            timings.add(start, connected, finished, event);
+        }
+    }
+    proxy_task.abort();
+    backend_task.abort();
+    eprintln!(
+        "{samples} paired samples, {bytes} bytes, {connect_mode} client connect, microseconds"
+    );
+    direct.print("direct");
+    proxied.print("proxy");
+    Ok(())
+}
