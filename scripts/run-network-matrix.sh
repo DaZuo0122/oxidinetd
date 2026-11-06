@@ -7,5 +7,10 @@ if [[ -n "${IPERF3:-}" && ! -f "$IPERF3" ]]; then
     exit 1
 fi
 cd -- "$repo"
-cargo build --release --features tcp-profile --bin oi --example network_workload_matrix
-cargo run --release --features tcp-profile --example network_workload_matrix -- "${1:-target/network-workload-matrix.md}"
+features=(--features tcp-profile)
+if [[ "${1:-}" == "--production" ]]; then
+    features=()
+    shift
+fi
+cargo build --release "${features[@]}" --bin oi --example network_workload_matrix
+cargo run --release "${features[@]}" --example network_workload_matrix -- "${1:-target/network-workload-matrix.md}"

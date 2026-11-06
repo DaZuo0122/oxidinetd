@@ -1,6 +1,6 @@
 //! End-to-end HTTP, HTTPS, and optional iperf3 comparison of direct,
 //! Tokio async-connect proxy, and blocking-pool-connect proxy paths.
-//! Build the `oi` binary with the same `tcp-profile` feature before running.
+//! Build the `oi` binary with the same Cargo features before running.
 
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -323,7 +323,7 @@ fn proxy_binary() -> Result<PathBuf> {
     let binary = release.join(if cfg!(windows) { "oi.exe" } else { "oi" });
     if !binary.is_file() {
         return Err(format!(
-            "missing {}; build --bin oi with --features tcp-profile",
+            "missing {}; build --bin oi with matching features",
             binary.display()
         )
         .into());
@@ -391,7 +391,11 @@ fn main() -> Result<()> {
     write_config(&async_config, &async_rules)?;
     write_config(&pool_config, &pool_rules)?;
     let _async_proxy = start_proxy(&binary, &async_config, false, async_http)?;
-    let _pool_proxy = start_proxy(&binary, &pool_config, true, pool_http)?;
+    let _pool_proxy = if cfg!(feature = "tcp-profile") {
+        Some(start_proxy(&binary, &pool_config, true, pool_http)?)
+    } else {
+        None
+    };
 
     let cases = [
         HttpCase {
@@ -471,12 +475,12 @@ fn main() -> Result<()> {
             if case.tls { pool_https } else { pool_http },
         ));
         let tls = case.tls.then(|| tls_client.clone());
-        let mut modes = [
-            ("direct", backend),
-            ("async", async_addr),
-            ("blocking-pool", pool_addr),
-        ];
-        modes.rotate_left(case_index % 3);
+        let mut modes = vec![("direct", backend), ("async", async_addr)];
+        if cfg!(feature = "tcp-profile") {
+            modes.push(("blocking-pool", pool_addr));
+        }
+        let offset = case_index % modes.len();
+        modes.rotate_left(offset);
         for (mode, addr) in modes {
             eprintln!("{} / {} / {} clients", case.name, mode, case.clients);
             results.push(run_http_case(case, mode, addr, tls.clone())?);
@@ -487,8 +491,12 @@ fn main() -> Result<()> {
         (&iperf, iperf_port, async_iperf, pool_iperf)
     {
         for (case_index, parallel) in [1, 4].into_iter().enumerate() {
-            let mut modes = [("direct", backend), ("async", a), ("blocking-pool", p)];
-            modes.rotate_left(case_index % 3);
+            let mut modes = vec![("direct", backend), ("async", a)];
+            if cfg!(feature = "tcp-profile") {
+                modes.push(("blocking-pool", p));
+            }
+            let offset = case_index % modes.len();
+            modes.rotate_left(offset);
             for (mode, port) in modes {
                 eprintln!("iperf3 / {} / {} streams", mode, parallel);
                 iperf_results.push((parallel, mode, iperf_result(path, port, parallel)?));
@@ -496,7 +504,11 @@ fn main() -> Result<()> {
         }
     }
     let mut report = String::from("# HTTP, HTTPS, and iperf3 workload matrix\n\n");
-    report.push_str("Modes: direct backend, actual oi proxy with Tokio async backend connect, and actual oi proxy with feature-gated `spawn_blocking` backend connect. All traffic uses 127.0.0.1. HTTP and HTTPS clients use blocking TCP connect in every mode; HTTPS uses TLS 1.3 through the proxy. Fresh cases include connection and TLS handshake; keepalive cases exclude setup with one warmup request per client. Each proxy runs in a separate process.\n\n");
+    report.push_str("Modes: direct backend and actual oi proxy with Tokio async backend connect.");
+    if cfg!(feature = "tcp-profile") {
+        report.push_str(" Also includes the feature-gated `spawn_blocking` backend connect mode.");
+    }
+    report.push_str(" All traffic uses 127.0.0.1. HTTP and HTTPS clients use blocking TCP connect in every mode; HTTPS uses TLS 1.3 through the proxy. Fresh cases include connection and TLS handshake; keepalive cases exclude setup with one warmup request per client. Each proxy runs in a separate process.\n\n");
     report.push_str("| Workload | Clients | Mode | Requests | p50 (µs) | p95 (µs) | p99 (µs) | Max (µs) | Requests/s |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");
     for row in results {
         report.push_str(&format!(

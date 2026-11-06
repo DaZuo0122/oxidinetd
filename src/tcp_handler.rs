@@ -1,7 +1,30 @@
 use std::error::Error;
 use std::net::SocketAddr;
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+
+async fn copy_tcp<A, B>(client: &mut A, backend: &mut B) -> io::Result<(u64, u64)>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    #[cfg(windows)]
+    {
+        // Response-heavy traffic benefits from a larger backend-to-client
+        // buffer. Keep the request direction small to limit per-flow memory.
+        const CLIENT_TO_BACKEND_BUFFER: usize = 8 * 1024;
+        const BACKEND_TO_CLIENT_BUFFER: usize = 32 * 1024;
+        io::copy_bidirectional_with_sizes(
+            client,
+            backend,
+            CLIENT_TO_BACKEND_BUFFER,
+            BACKEND_TO_CLIENT_BUFFER,
+        )
+        .await
+    }
+    #[cfg(not(windows))]
+    io::copy_bidirectional(client, backend).await
+}
 
 pub async fn handle_tcp_connection(
     mut client_stream: TcpStream,
@@ -39,7 +62,7 @@ pub async fn handle_tcp_connection(
             crate::tcp_profile::emit(profile_addr, crate::tcp_profile::Stage::BackendConnected);
 
             #[cfg(not(feature = "tcp-profile"))]
-            io::copy_bidirectional(&mut client_stream, &mut server_stream).await?;
+            copy_tcp(&mut client_stream, &mut server_stream).await?;
             #[cfg(feature = "tcp-profile")]
             {
                 use crate::tcp_profile::{ProfiledStream, Stage};
@@ -56,7 +79,7 @@ pub async fn handle_tcp_connection(
                     Stage::BackendWritten,
                 );
                 crate::tcp_profile::emit(profile_addr, Stage::CopyStarted);
-                io::copy_bidirectional(&mut client, &mut backend).await?;
+                copy_tcp(&mut client, &mut backend).await?;
             }
         }
         crate::config::Protocol::TcpToUdp => {
