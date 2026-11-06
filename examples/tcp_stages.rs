@@ -1,6 +1,10 @@
 //! Stage timings for direct and proxied TCP echo sessions.
 //! Run with: cargo run --release --example tcp_stages -- [SAMPLES] [BYTES] [async|sync]
 
+#[cfg(feature = "tcp-profile")]
+use oxidinetd::tcp_profile::{Event, Stage};
+#[cfg(feature = "tcp-profile")]
+use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -15,6 +19,16 @@ struct BackendEvent {
     accepted: Instant,
     request_read: Instant,
     response_written: Instant,
+}
+
+#[cfg(feature = "tcp-profile")]
+struct TraceSample {
+    client_addr: SocketAddr,
+    start: Instant,
+    connected: Instant,
+    finished: Instant,
+    backend_accepted: Instant,
+    backend_read: Instant,
 }
 
 #[derive(Default)]
@@ -94,7 +108,7 @@ async fn session(
     bytes: usize,
     sync_connect: bool,
     events: &mut mpsc::UnboundedReceiver<BackendEvent>,
-) -> Result<(Instant, Instant, Instant, BackendEvent)> {
+) -> Result<(SocketAddr, Instant, Instant, Instant, BackendEvent)> {
     let mut payload = vec![0x42; bytes];
     payload[..8].copy_from_slice(&id.to_le_bytes());
     let start = Instant::now();
@@ -103,6 +117,7 @@ async fn session(
     } else {
         TcpStream::connect(addr).await?
     };
+    let client_addr = client.local_addr()?;
     let connected = Instant::now();
     client.write_all(&payload).await?;
     let mut response = vec![0; bytes];
@@ -117,7 +132,98 @@ async fn session(
     if event.id != id {
         return Err(format!("backend event mismatch: expected {id}, got {}", event.id).into());
     }
-    Ok((start, connected, finished, event))
+    Ok((client_addr, start, connected, finished, event))
+}
+
+#[cfg(feature = "tcp-profile")]
+fn print_profile(samples: &[TraceSample], events: &mut mpsc::UnboundedReceiver<Event>) {
+    let mut by_client: HashMap<SocketAddr, HashMap<Stage, Instant>> = HashMap::new();
+    while let Ok(event) = events.try_recv() {
+        by_client
+            .entry(event.client_addr)
+            .or_default()
+            .insert(event.stage, event.at);
+    }
+    eprintln!("proxy internal stages (microseconds):");
+    for (name, from, to) in [
+        ("accept to handler", Stage::Accepted, Stage::HandlerStarted),
+        (
+            "backend connect",
+            Stage::BackendConnectStarted,
+            Stage::BackendConnected,
+        ),
+        (
+            "connect to copy",
+            Stage::BackendConnected,
+            Stage::CopyStarted,
+        ),
+        (
+            "copy to first client read",
+            Stage::CopyStarted,
+            Stage::ClientRead,
+        ),
+        (
+            "client read to backend write",
+            Stage::ClientRead,
+            Stage::BackendWritten,
+        ),
+        (
+            "backend read to client write",
+            Stage::BackendRead,
+            Stage::ClientWritten,
+        ),
+    ] {
+        let mut values: Vec<u64> = samples
+            .iter()
+            .filter_map(|sample| {
+                let stages = by_client.get(&sample.client_addr)?;
+                Some(us(*stages.get(&from)?, *stages.get(&to)?))
+            })
+            .collect();
+        values.sort_unstable();
+        if !values.is_empty() {
+            let p50 = values[values.len() / 2];
+            let p99 = values[(values.len() * 99 / 100).min(values.len() - 1)];
+            let over_1ms = values.iter().filter(|&&value| value > 1000).count();
+            eprintln!(
+                "  {name}: n {}, p50 {p50}, p99 {p99}, >1 ms {over_1ms}",
+                values.len()
+            );
+        }
+    }
+    let mut outliers: Vec<_> = samples
+        .iter()
+        .filter(|sample| us(sample.start, sample.finished) > 5000)
+        .collect();
+    outliers.sort_unstable_by_key(|sample| std::cmp::Reverse(us(sample.start, sample.finished)));
+    eprintln!("proxy sessions >5 ms: {}", outliers.len());
+    for sample in outliers.into_iter().take(8) {
+        eprintln!(
+            "  total {} µs, client connect {} µs, backend accept {} µs, backend read {} µs",
+            us(sample.start, sample.finished),
+            us(sample.start, sample.connected),
+            us(sample.start, sample.backend_accepted),
+            us(sample.start, sample.backend_read)
+        );
+        if let Some(stages) = by_client.get(&sample.client_addr) {
+            for stage in [
+                Stage::Accepted,
+                Stage::HandlerStarted,
+                Stage::BackendConnectStarted,
+                Stage::BackendConnected,
+                Stage::CopyStarted,
+                Stage::ClientRead,
+                Stage::BackendWritten,
+                Stage::BackendRead,
+                Stage::ClientWritten,
+            ] {
+                if let Some(at) = stages.get(&stage) {
+                    eprint!(" {:?}={}", stage, us(sample.start, *at));
+                }
+            }
+            eprintln!();
+        }
+    }
 }
 
 fn connect_sync(addr: SocketAddr) -> std::io::Result<TcpStream> {
@@ -129,8 +235,7 @@ fn connect_sync(addr: SocketAddr) -> std::io::Result<TcpStream> {
     TcpStream::from_std(stream)
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let samples: usize = args.next().unwrap_or_else(|| "200".into()).parse()?;
     let bytes: usize = args.next().unwrap_or_else(|| "8".into()).parse()?;
@@ -143,6 +248,13 @@ async fn main() -> Result<()> {
         return Err("usage: tcp_stages [SAMPLES>0] [BYTES>=8] [async|sync]".into());
     }
     let sync_connect = connect_mode == "sync";
+    #[cfg(feature = "tcp-profile")]
+    let (profile_sender, mut profile_events) = mpsc::unbounded_channel();
+    #[cfg(feature = "tcp-profile")]
+    assert!(
+        oxidinetd::tcp_profile::install(profile_sender),
+        "profile sink already installed"
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let backend_addr = listener.local_addr()?;
     let (sender, mut events) = mpsc::unbounded_channel();
@@ -168,6 +280,8 @@ async fn main() -> Result<()> {
 
     let mut direct = Timings::default();
     let mut proxied = Timings::default();
+    #[cfg(feature = "tcp-profile")]
+    let mut traces = Vec::with_capacity(samples);
     for i in 0..samples {
         let paths = if i % 2 == 0 {
             [
@@ -181,8 +295,21 @@ async fn main() -> Result<()> {
             ]
         };
         for (addr, timings, id) in paths {
-            let (start, connected, finished, event) =
+            let (client_addr, start, connected, finished, event) =
                 session(addr, id, bytes, sync_connect, &mut events).await?;
+            #[cfg(not(feature = "tcp-profile"))]
+            let _ = client_addr;
+            #[cfg(feature = "tcp-profile")]
+            if addr == proxy_addr {
+                traces.push(TraceSample {
+                    client_addr,
+                    start,
+                    connected,
+                    finished,
+                    backend_accepted: event.accepted,
+                    backend_read: event.request_read,
+                });
+            }
             timings.add(start, connected, finished, event);
         }
     }
@@ -193,5 +320,24 @@ async fn main() -> Result<()> {
     );
     direct.print("direct");
     proxied.print("proxy");
+    #[cfg(feature = "tcp-profile")]
+    print_profile(&traces, &mut profile_events);
     Ok(())
+}
+
+fn main() -> Result<()> {
+    let workers: usize = std::env::var("OI_PROFILE_WORKERS")
+        .ok()
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(std::thread::available_parallelism()?.get());
+    if workers == 0 {
+        return Err("OI_PROFILE_WORKERS must be positive".into());
+    }
+    eprintln!("Tokio worker threads: {workers}");
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()?
+        .block_on(run())
 }

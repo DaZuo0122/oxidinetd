@@ -10,9 +10,54 @@ pub async fn handle_tcp_connection(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     match protocol {
         crate::config::Protocol::Tcp => {
+            #[cfg(feature = "tcp-profile")]
+            let profile_addr = client_stream.peer_addr()?;
+            #[cfg(feature = "tcp-profile")]
+            crate::tcp_profile::emit(
+                profile_addr,
+                crate::tcp_profile::Stage::BackendConnectStarted,
+            );
+            #[cfg(not(feature = "tcp-profile"))]
             let mut server_stream = TcpStream::connect(&server_addr).await?;
+            #[cfg(feature = "tcp-profile")]
+            let mut server_stream =
+                if std::env::var_os("OI_PROFILE_BLOCKING_POOL_CONNECT").is_some() {
+                    let address = server_addr.clone();
+                    let stream =
+                        tokio::task::spawn_blocking(move || std::net::TcpStream::connect(address))
+                            .await??;
+                    stream.set_nonblocking(true)?;
+                    TcpStream::from_std(stream)?
+                } else if std::env::var_os("OI_PROFILE_SYNC_BACKEND_CONNECT").is_some() {
+                    let stream = std::net::TcpStream::connect(&server_addr)?;
+                    stream.set_nonblocking(true)?;
+                    TcpStream::from_std(stream)?
+                } else {
+                    TcpStream::connect(&server_addr).await?
+                };
+            #[cfg(feature = "tcp-profile")]
+            crate::tcp_profile::emit(profile_addr, crate::tcp_profile::Stage::BackendConnected);
 
+            #[cfg(not(feature = "tcp-profile"))]
             io::copy_bidirectional(&mut client_stream, &mut server_stream).await?;
+            #[cfg(feature = "tcp-profile")]
+            {
+                use crate::tcp_profile::{ProfiledStream, Stage};
+                let mut client = ProfiledStream::new(
+                    &mut client_stream,
+                    profile_addr,
+                    Stage::ClientRead,
+                    Stage::ClientWritten,
+                );
+                let mut backend = ProfiledStream::new(
+                    &mut server_stream,
+                    profile_addr,
+                    Stage::BackendRead,
+                    Stage::BackendWritten,
+                );
+                crate::tcp_profile::emit(profile_addr, Stage::CopyStarted);
+                io::copy_bidirectional(&mut client, &mut backend).await?;
+            }
         }
         crate::config::Protocol::TcpToUdp => {
             // Create a UDP socket for forwarding
@@ -69,6 +114,8 @@ pub async fn start_tcp_forwarding(
 
     loop {
         let (client_stream, client_addr) = listener.accept().await?;
+        #[cfg(feature = "tcp-profile")]
+        crate::tcp_profile::emit(client_addr, crate::tcp_profile::Stage::Accepted);
         println!("New connection from {}", client_addr);
 
         // Clone the connect_addr for each connection
@@ -77,6 +124,8 @@ pub async fn start_tcp_forwarding(
 
         // Spawn a new task to handle this connection
         tokio::spawn(async move {
+            #[cfg(feature = "tcp-profile")]
+            crate::tcp_profile::emit(client_addr, crate::tcp_profile::Stage::HandlerStarted);
             if let Err(e) =
                 handle_tcp_connection(client_stream, connect_addr_clone, protocol_clone).await
             {

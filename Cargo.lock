@@ -691,6 +691,7 @@ dependencies = [
  "criterion",
  "ctrlc",
  "libc",
+ "mio",
  "rcgen",
  "rustls",
  "rustls-pemfile",
