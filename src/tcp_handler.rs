@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
+#[cfg(any(not(windows), feature = "tcp-profile"))]
 async fn copy_tcp<A, B>(client: &mut A, backend: &mut B) -> io::Result<(u64, u64)>
 where
     A: AsyncRead + AsyncWrite + Unpin,
@@ -10,20 +11,90 @@ where
 {
     #[cfg(windows)]
     {
-        // Response-heavy traffic benefits from a larger backend-to-client
-        // buffer. Keep the request direction small to limit per-flow memory.
-        const CLIENT_TO_BACKEND_BUFFER: usize = 8 * 1024;
-        const BACKEND_TO_CLIENT_BUFFER: usize = 32 * 1024;
-        io::copy_bidirectional_with_sizes(
-            client,
-            backend,
-            CLIENT_TO_BACKEND_BUFFER,
-            BACKEND_TO_CLIENT_BUFFER,
+        let (client_read, client_write) = io::split(client);
+        let (backend_read, backend_write) = io::split(backend);
+        tokio::try_join!(
+            copy_tcp_direction(client_read, backend_write),
+            copy_tcp_direction(backend_read, client_write)
         )
-        .await
     }
     #[cfg(not(windows))]
     io::copy_bidirectional(client, backend).await
+}
+
+#[cfg(all(windows, not(feature = "tcp-profile")))]
+async fn copy_tcp_streams(
+    client: &mut TcpStream,
+    backend: &mut TcpStream,
+) -> io::Result<(u64, u64)> {
+    let (client_read, client_write) = client.split();
+    let (backend_read, backend_write) = backend.split();
+    tokio::try_join!(
+        copy_tcp_direction(client_read, backend_write),
+        copy_tcp_direction(backend_read, client_write)
+    )
+}
+
+#[cfg(windows)]
+async fn copy_tcp_direction<R, W>(mut reader: R, mut writer: W) -> io::Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    use std::time::Duration;
+
+    const MIN_SIZE: usize = 8 * 1024;
+    const MAX_SIZE: usize = 32 * 1024;
+    // Each direction scales independently. Idle and repeated small reads
+    // release the larger buffer after the traffic mix changes.
+    let mut buffer = vec![0; MIN_SIZE];
+    let mut full_reads = 0u8;
+    let mut small_reads = 0u8;
+    let mut total = 0u64;
+    loop {
+        let read = if buffer.len() > MIN_SIZE {
+            match tokio::time::timeout(Duration::from_millis(500), reader.read(&mut buffer)).await {
+                Ok(result) => result,
+                Err(_) => {
+                    buffer = vec![0; buffer.len() / 2];
+                    full_reads = 0;
+                    small_reads = 0;
+                    continue;
+                }
+            }
+        } else {
+            reader.read(&mut buffer).await
+        };
+        let n = match read {
+            Ok(n) => n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if n == 0 {
+            writer.shutdown().await?;
+            return Ok(total);
+        }
+        writer.write_all(&buffer[..n]).await?;
+        total += n as u64;
+        if n == buffer.len() {
+            full_reads = full_reads.saturating_add(1);
+            small_reads = 0;
+            if full_reads >= 4 && buffer.len() < MAX_SIZE {
+                buffer = vec![0; buffer.len() * 2];
+                full_reads = 0;
+            }
+        } else if n <= buffer.len() / 4 {
+            small_reads = small_reads.saturating_add(1);
+            full_reads = 0;
+            if small_reads >= 32 && buffer.len() > MIN_SIZE {
+                buffer = vec![0; buffer.len() / 2];
+                small_reads = 0;
+            }
+        } else {
+            full_reads = 0;
+            small_reads = 0;
+        }
+    }
 }
 
 pub async fn handle_tcp_connection(
@@ -62,7 +133,12 @@ pub async fn handle_tcp_connection(
             crate::tcp_profile::emit(profile_addr, crate::tcp_profile::Stage::BackendConnected);
 
             #[cfg(not(feature = "tcp-profile"))]
-            copy_tcp(&mut client_stream, &mut server_stream).await?;
+            {
+                #[cfg(windows)]
+                copy_tcp_streams(&mut client_stream, &mut server_stream).await?;
+                #[cfg(not(windows))]
+                copy_tcp(&mut client_stream, &mut server_stream).await?;
+            }
             #[cfg(feature = "tcp-profile")]
             {
                 use crate::tcp_profile::{ProfiledStream, Stage};

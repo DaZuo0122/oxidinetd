@@ -39,9 +39,13 @@ fn tcp_half_close_reaches_backend() {
     let backend = std::thread::spawn(move || {
         loop {
             let (mut stream, _) = listener.accept().expect("accept backend connection");
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             let mut request = Vec::new();
-            stream.read_to_end(&mut request).expect("read request to EOF");
+            stream
+                .read_to_end(&mut request)
+                .expect("read request to EOF");
             if request.is_empty() {
                 continue; // The proxy's readiness probe opens and closes a connection.
             }
@@ -56,11 +60,17 @@ fn tcp_half_close_reaches_backend() {
     assert!(wait_for_port(proxy.bind_addr, Duration::from_secs(10)));
 
     let mut client = TcpStream::connect(proxy.bind_addr).expect("connect to proxy");
-    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     client.write_all(b"request").expect("write request");
-    client.shutdown(Shutdown::Write).expect("half-close request");
+    client
+        .shutdown(Shutdown::Write)
+        .expect("half-close request");
     let mut response = Vec::new();
-    client.read_to_end(&mut response).expect("read response to EOF");
+    client
+        .read_to_end(&mut response)
+        .expect("read response to EOF");
     assert_eq!(response, b"response");
     backend.join().expect("backend thread");
     assert!(proxy.is_alive());
@@ -78,6 +88,53 @@ fn tcp_large_payload() {
     assert_eq!(response.len(), payload.len());
     assert_eq!(response, payload);
 
+    assert!(proxy.is_alive());
+}
+
+#[test]
+fn tcp_direction_changes_on_one_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind backend");
+    let backend_port = listener.local_addr().unwrap().port();
+    let backend = std::thread::spawn(move || {
+        loop {
+            let (mut stream, _) = listener.accept().expect("accept backend");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut start = [0u8; 1];
+            if stream.read_exact(&mut start).is_err() {
+                continue; // The proxy's readiness probe.
+            }
+            assert_eq!(start, [1]);
+            stream.write_all(&vec![0xA5; 2 * 1024 * 1024]).unwrap();
+            let mut upload = vec![0; 2 * 1024 * 1024];
+            stream.read_exact(&mut upload).unwrap();
+            assert!(upload.iter().all(|&byte| byte == 0x5A));
+            stream.write_all(&[2]).unwrap();
+            break;
+        }
+    });
+    let port = reserve_proxy_port();
+    let mut proxy = spawn_proxy(&tcp_proxy_config(port, backend_port));
+    let mut client = TcpStream::connect(proxy.bind_addr).expect("connect to proxy");
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    client
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    client.write_all(&[1]).unwrap();
+    let mut download = vec![0; 2 * 1024 * 1024];
+    client.read_exact(&mut download).unwrap();
+    assert!(download.iter().all(|&byte| byte == 0xA5));
+    client.write_all(&vec![0x5A; 2 * 1024 * 1024]).unwrap();
+    let mut finish = [0u8; 1];
+    client.read_exact(&mut finish).unwrap();
+    assert_eq!(finish, [2]);
+    backend.join().unwrap();
     assert!(proxy.is_alive());
 }
 
@@ -135,7 +192,9 @@ fn tcp_server_unreachable() {
     assert!(wait_for_port(proxy.bind_addr, Duration::from_secs(10)));
 
     let mut stream = TcpStream::connect(proxy.bind_addr).expect("connect to proxy");
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let mut buf = [0u8; 16];
     match stream.read(&mut buf) {
         // The proxy cannot reach the backend, so the client sees EOF or a reset.
