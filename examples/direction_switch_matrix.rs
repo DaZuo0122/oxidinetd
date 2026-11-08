@@ -11,7 +11,7 @@ use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
-const MODES: [&str; 4] = ["adaptive", "fixed-8k", "fixed-16k", "fixed-32k"];
+const MODES: [&str; 5] = ["adaptive", "fixed-8k", "fixed-16k", "fixed-32k", "rio"];
 
 struct Guard(Child);
 impl Drop for Guard {
@@ -101,7 +101,10 @@ fn proxy(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     command.env_remove("OI_COPY_BUFFER_MODE");
-    if mode != "adaptive" {
+    command.env_remove("OI_RELAY_BACKEND");
+    if mode == "rio" {
+        command.env("OI_RELAY_BACKEND", "rio");
+    } else if mode != "adaptive" {
         command.env("OI_COPY_BUFFER_MODE", mode);
     }
     let mut child = Guard(command.spawn()?);

@@ -273,7 +273,7 @@ fn wait_for_port(port: u16, child: &mut Child) -> Result<()> {
     Err(format!("proxy port {port} did not become ready").into())
 }
 
-fn start_proxy(binary: &Path, config: &Path, pool: bool, first_port: u16) -> Result<ChildGuard> {
+fn start_proxy(binary: &Path, config: &Path, mode: &str, first_port: u16) -> Result<ChildGuard> {
     let mut command = Command::new(binary);
     command
         .arg("--config")
@@ -282,11 +282,15 @@ fn start_proxy(binary: &Path, config: &Path, pool: bool, first_port: u16) -> Res
         .stderr(Stdio::null());
     command.env_remove("OI_PROFILE_SYNC_BACKEND_CONNECT");
     command.env_remove("OI_BACKEND_CONNECT_MODE");
-    if pool {
+    command.env_remove("OI_RELAY_BACKEND");
+    if mode == "blocking-pool" {
         command.env("OI_PROFILE_BLOCKING_POOL_CONNECT", "1");
         command.env("OI_BACKEND_CONNECT_MODE", "blocking-pool");
     } else {
         command.env_remove("OI_PROFILE_BLOCKING_POOL_CONNECT");
+    }
+    if mode == "rio" {
+        command.env("OI_RELAY_BACKEND", "rio");
     }
     let mut child = ChildGuard(command.spawn()?);
     wait_for_port(first_port, &mut child.0)?;
@@ -375,9 +379,17 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    let rio_http = reserve_port()?;
+    let rio_https = reserve_port()?;
+    let rio_iperf = if iperf.is_some() {
+        Some(reserve_port()?)
+    } else {
+        None
+    };
     let temporary = tempfile::tempdir()?;
     let async_config = temporary.path().join("async.toml");
     let pool_config = temporary.path().join("pool.toml");
+    let rio_config = temporary.path().join("rio.toml");
     let mut async_rules = vec![
         (async_http, http.addr.port()),
         (async_https, https.addr.port()),
@@ -386,15 +398,30 @@ fn main() -> Result<()> {
         (pool_http, http.addr.port()),
         (pool_https, https.addr.port()),
     ];
+    let mut rio_rules = vec![(rio_http, http.addr.port()), (rio_https, https.addr.port())];
     if let (Some(backend), Some(a), Some(p)) = (iperf_port, async_iperf, pool_iperf) {
         async_rules.push((a, backend));
         pool_rules.push((p, backend));
     }
+    if let (Some(backend), Some(port)) = (iperf_port, rio_iperf) {
+        rio_rules.push((port, backend));
+    }
     write_config(&async_config, &async_rules)?;
     write_config(&pool_config, &pool_rules)?;
-    let _async_proxy = start_proxy(&binary, &async_config, false, async_http)?;
+    write_config(&rio_config, &rio_rules)?;
+    let _async_proxy = start_proxy(&binary, &async_config, "async", async_http)?;
     let _pool_proxy = if cfg!(feature = "tcp-profile") || cfg!(windows) {
-        Some(start_proxy(&binary, &pool_config, true, pool_http)?)
+        Some(start_proxy(
+            &binary,
+            &pool_config,
+            "blocking-pool",
+            pool_http,
+        )?)
+    } else {
+        None
+    };
+    let _rio_proxy = if cfg!(windows) && !cfg!(feature = "tcp-profile") {
+        Some(start_proxy(&binary, &rio_config, "rio", rio_http)?)
     } else {
         None
     };
@@ -476,10 +503,15 @@ fn main() -> Result<()> {
             [127, 0, 0, 1],
             if case.tls { pool_https } else { pool_http },
         ));
+        let rio_addr =
+            SocketAddr::from(([127, 0, 0, 1], if case.tls { rio_https } else { rio_http }));
         let tls = case.tls.then(|| tls_client.clone());
         let mut modes = vec![("direct", backend), ("async", async_addr)];
         if cfg!(feature = "tcp-profile") || cfg!(windows) {
             modes.push(("blocking-pool", pool_addr));
+        }
+        if cfg!(windows) && !cfg!(feature = "tcp-profile") {
+            modes.push(("rio", rio_addr));
         }
         let offset = case_index % modes.len();
         modes.rotate_left(offset);
@@ -489,13 +521,16 @@ fn main() -> Result<()> {
         }
     }
     let mut iperf_results = Vec::new();
-    if let (Some(path), Some(backend), Some(a), Some(p)) =
-        (&iperf, iperf_port, async_iperf, pool_iperf)
+    if let (Some(path), Some(backend), Some(a), Some(p), Some(r)) =
+        (&iperf, iperf_port, async_iperf, pool_iperf, rio_iperf)
     {
         for (case_index, parallel) in [1, 4].into_iter().enumerate() {
             let mut modes = vec![("direct", backend), ("async", a)];
             if cfg!(feature = "tcp-profile") || cfg!(windows) {
                 modes.push(("blocking-pool", p));
+            }
+            if cfg!(windows) && !cfg!(feature = "tcp-profile") {
+                modes.push(("rio", r));
             }
             let offset = case_index % modes.len();
             modes.rotate_left(offset);
@@ -509,6 +544,9 @@ fn main() -> Result<()> {
     report.push_str("Modes: direct backend and actual oi proxy with Tokio async backend connect.");
     if cfg!(feature = "tcp-profile") || cfg!(windows) {
         report.push_str(" Also includes the `spawn_blocking` backend connect mode.");
+    }
+    if cfg!(windows) && !cfg!(feature = "tcp-profile") {
+        report.push_str(" Also includes the experimental Windows RIO relay.");
     }
     report.push_str(" All traffic uses 127.0.0.1. HTTP and HTTPS clients use blocking TCP connect in every mode; HTTPS uses TLS 1.3 through the proxy. Fresh cases include connection and TLS handshake; keepalive cases exclude setup with one warmup request per client. Each proxy runs in a separate process.\n\n");
     report.push_str("| Workload | Clients | Mode | Requests | p50 (µs) | p95 (µs) | p99 (µs) | Max (µs) | Requests/s |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");

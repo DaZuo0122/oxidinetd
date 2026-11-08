@@ -239,6 +239,12 @@ pub async fn start_tcp_forwarding(
     connect_addr: String,
     protocol: crate::config::Protocol,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    if protocol == crate::config::Protocol::Tcp
+        && std::env::var("OI_RELAY_BACKEND").as_deref() == Ok("rio")
+    {
+        return Ok(crate::rio_relay::start(bind_addr, connect_addr).await?);
+    }
     let listener = TcpListener::bind(bind_addr).await?;
 
     loop {
