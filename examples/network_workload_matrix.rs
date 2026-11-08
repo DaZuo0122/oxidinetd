@@ -281,8 +281,10 @@ fn start_proxy(binary: &Path, config: &Path, pool: bool, first_port: u16) -> Res
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     command.env_remove("OI_PROFILE_SYNC_BACKEND_CONNECT");
+    command.env_remove("OI_BACKEND_CONNECT_MODE");
     if pool {
         command.env("OI_PROFILE_BLOCKING_POOL_CONNECT", "1");
+        command.env("OI_BACKEND_CONNECT_MODE", "blocking-pool");
     } else {
         command.env_remove("OI_PROFILE_BLOCKING_POOL_CONNECT");
     }
@@ -391,7 +393,7 @@ fn main() -> Result<()> {
     write_config(&async_config, &async_rules)?;
     write_config(&pool_config, &pool_rules)?;
     let _async_proxy = start_proxy(&binary, &async_config, false, async_http)?;
-    let _pool_proxy = if cfg!(feature = "tcp-profile") {
+    let _pool_proxy = if cfg!(feature = "tcp-profile") || cfg!(windows) {
         Some(start_proxy(&binary, &pool_config, true, pool_http)?)
     } else {
         None
@@ -476,7 +478,7 @@ fn main() -> Result<()> {
         ));
         let tls = case.tls.then(|| tls_client.clone());
         let mut modes = vec![("direct", backend), ("async", async_addr)];
-        if cfg!(feature = "tcp-profile") {
+        if cfg!(feature = "tcp-profile") || cfg!(windows) {
             modes.push(("blocking-pool", pool_addr));
         }
         let offset = case_index % modes.len();
@@ -492,7 +494,7 @@ fn main() -> Result<()> {
     {
         for (case_index, parallel) in [1, 4].into_iter().enumerate() {
             let mut modes = vec![("direct", backend), ("async", a)];
-            if cfg!(feature = "tcp-profile") {
+            if cfg!(feature = "tcp-profile") || cfg!(windows) {
                 modes.push(("blocking-pool", p));
             }
             let offset = case_index % modes.len();
@@ -505,8 +507,8 @@ fn main() -> Result<()> {
     }
     let mut report = String::from("# HTTP, HTTPS, and iperf3 workload matrix\n\n");
     report.push_str("Modes: direct backend and actual oi proxy with Tokio async backend connect.");
-    if cfg!(feature = "tcp-profile") {
-        report.push_str(" Also includes the feature-gated `spawn_blocking` backend connect mode.");
+    if cfg!(feature = "tcp-profile") || cfg!(windows) {
+        report.push_str(" Also includes the `spawn_blocking` backend connect mode.");
     }
     report.push_str(" All traffic uses 127.0.0.1. HTTP and HTTPS clients use blocking TCP connect in every mode; HTTPS uses TLS 1.3 through the proxy. Fresh cases include connection and TLS handshake; keepalive cases exclude setup with one warmup request per client. Each proxy runs in a separate process.\n\n");
     report.push_str("| Workload | Clients | Mode | Requests | p50 (µs) | p95 (µs) | p99 (µs) | Max (µs) | Requests/s |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");

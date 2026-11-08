@@ -123,7 +123,26 @@ pub async fn handle_tcp_connection(
                 crate::tcp_profile::Stage::BackendConnectStarted,
             );
             #[cfg(not(feature = "tcp-profile"))]
-            let mut server_stream = TcpStream::connect(&server_addr).await?;
+            let mut server_stream = {
+                #[cfg(windows)]
+                {
+                    static BLOCKING_POOL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    if *BLOCKING_POOL.get_or_init(|| {
+                        std::env::var("OI_BACKEND_CONNECT_MODE").as_deref() == Ok("blocking-pool")
+                    }) {
+                        let stream = tokio::task::spawn_blocking(move || {
+                            std::net::TcpStream::connect(server_addr)
+                        })
+                        .await??;
+                        stream.set_nonblocking(true)?;
+                        TcpStream::from_std(stream)?
+                    } else {
+                        TcpStream::connect(&server_addr).await?
+                    }
+                }
+                #[cfg(not(windows))]
+                TcpStream::connect(&server_addr).await?
+            };
             #[cfg(feature = "tcp-profile")]
             let mut server_stream =
                 if std::env::var_os("OI_PROFILE_BLOCKING_POOL_CONNECT").is_some() {

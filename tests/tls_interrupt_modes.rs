@@ -1,4 +1,4 @@
-#![cfg(feature = "tcp-profile")]
+#![cfg(any(feature = "tcp-profile", windows))]
 
 mod tls_common;
 
@@ -64,9 +64,11 @@ fn proxy(backend: SocketAddr, mode: Mode) -> Proxy {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .env_remove("OI_PROFILE_SYNC_BACKEND_CONNECT")
-        .env_remove("OI_PROFILE_BLOCKING_POOL_CONNECT");
+        .env_remove("OI_PROFILE_BLOCKING_POOL_CONNECT")
+        .env_remove("OI_BACKEND_CONNECT_MODE");
     if matches!(mode, Mode::BlockingPool) {
         command.env("OI_PROFILE_BLOCKING_POOL_CONNECT", "1");
+        command.env("OI_BACKEND_CONNECT_MODE", "blocking-pool");
     }
     let child = command.spawn().expect("start proxy");
     let mut proxy = Proxy {
