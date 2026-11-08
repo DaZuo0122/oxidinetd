@@ -283,7 +283,8 @@ fn start_proxy(binary: &Path, config: &Path, mode: &str, first_port: u16) -> Res
     command.env_remove("OI_PROFILE_SYNC_BACKEND_CONNECT");
     command.env_remove("OI_BACKEND_CONNECT_MODE");
     command.env_remove("OI_RELAY_BACKEND");
-    if mode == "blocking-pool" {
+    command.env_remove("OI_COPY_BUFFER_MODE");
+    if mode == "blocking-pool" || mode == "tokio-pipeline" {
         command.env("OI_PROFILE_BLOCKING_POOL_CONNECT", "1");
         command.env("OI_BACKEND_CONNECT_MODE", "blocking-pool");
     } else {
@@ -291,6 +292,8 @@ fn start_proxy(binary: &Path, config: &Path, mode: &str, first_port: u16) -> Res
     }
     if mode == "rio" {
         command.env("OI_RELAY_BACKEND", "rio");
+    } else if mode == "tokio-pipeline" {
+        command.env("OI_COPY_BUFFER_MODE", "pipeline-32k");
     }
     let mut child = ChildGuard(command.spawn()?);
     wait_for_port(first_port, &mut child.0)?;
@@ -386,10 +389,18 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    let pipeline_http = reserve_port()?;
+    let pipeline_https = reserve_port()?;
+    let pipeline_iperf = if iperf.is_some() {
+        Some(reserve_port()?)
+    } else {
+        None
+    };
     let temporary = tempfile::tempdir()?;
     let async_config = temporary.path().join("async.toml");
     let pool_config = temporary.path().join("pool.toml");
     let rio_config = temporary.path().join("rio.toml");
+    let pipeline_config = temporary.path().join("pipeline.toml");
     let mut async_rules = vec![
         (async_http, http.addr.port()),
         (async_https, https.addr.port()),
@@ -399,6 +410,10 @@ fn main() -> Result<()> {
         (pool_https, https.addr.port()),
     ];
     let mut rio_rules = vec![(rio_http, http.addr.port()), (rio_https, https.addr.port())];
+    let mut pipeline_rules = vec![
+        (pipeline_http, http.addr.port()),
+        (pipeline_https, https.addr.port()),
+    ];
     if let (Some(backend), Some(a), Some(p)) = (iperf_port, async_iperf, pool_iperf) {
         async_rules.push((a, backend));
         pool_rules.push((p, backend));
@@ -406,9 +421,13 @@ fn main() -> Result<()> {
     if let (Some(backend), Some(port)) = (iperf_port, rio_iperf) {
         rio_rules.push((port, backend));
     }
+    if let (Some(backend), Some(port)) = (iperf_port, pipeline_iperf) {
+        pipeline_rules.push((port, backend));
+    }
     write_config(&async_config, &async_rules)?;
     write_config(&pool_config, &pool_rules)?;
     write_config(&rio_config, &rio_rules)?;
+    write_config(&pipeline_config, &pipeline_rules)?;
     let _async_proxy = start_proxy(&binary, &async_config, "async", async_http)?;
     let _pool_proxy = if cfg!(feature = "tcp-profile") || cfg!(windows) {
         Some(start_proxy(
@@ -422,6 +441,16 @@ fn main() -> Result<()> {
     };
     let _rio_proxy = if cfg!(windows) && !cfg!(feature = "tcp-profile") {
         Some(start_proxy(&binary, &rio_config, "rio", rio_http)?)
+    } else {
+        None
+    };
+    let _pipeline_proxy = if cfg!(windows) && !cfg!(feature = "tcp-profile") {
+        Some(start_proxy(
+            &binary,
+            &pipeline_config,
+            "tokio-pipeline",
+            pipeline_http,
+        )?)
     } else {
         None
     };
@@ -505,6 +534,14 @@ fn main() -> Result<()> {
         ));
         let rio_addr =
             SocketAddr::from(([127, 0, 0, 1], if case.tls { rio_https } else { rio_http }));
+        let pipeline_addr = SocketAddr::from((
+            [127, 0, 0, 1],
+            if case.tls {
+                pipeline_https
+            } else {
+                pipeline_http
+            },
+        ));
         let tls = case.tls.then(|| tls_client.clone());
         let mut modes = vec![("direct", backend), ("async", async_addr)];
         if cfg!(feature = "tcp-profile") || cfg!(windows) {
@@ -512,6 +549,7 @@ fn main() -> Result<()> {
         }
         if cfg!(windows) && !cfg!(feature = "tcp-profile") {
             modes.push(("rio", rio_addr));
+            modes.push(("tokio-pipeline", pipeline_addr));
         }
         let offset = case_index % modes.len();
         modes.rotate_left(offset);
@@ -521,9 +559,14 @@ fn main() -> Result<()> {
         }
     }
     let mut iperf_results = Vec::new();
-    if let (Some(path), Some(backend), Some(a), Some(p), Some(r)) =
-        (&iperf, iperf_port, async_iperf, pool_iperf, rio_iperf)
-    {
+    if let (Some(path), Some(backend), Some(a), Some(p), Some(r), Some(t)) = (
+        &iperf,
+        iperf_port,
+        async_iperf,
+        pool_iperf,
+        rio_iperf,
+        pipeline_iperf,
+    ) {
         for (case_index, parallel) in [1, 4].into_iter().enumerate() {
             let mut modes = vec![("direct", backend), ("async", a)];
             if cfg!(feature = "tcp-profile") || cfg!(windows) {
@@ -531,6 +574,7 @@ fn main() -> Result<()> {
             }
             if cfg!(windows) && !cfg!(feature = "tcp-profile") {
                 modes.push(("rio", r));
+                modes.push(("tokio-pipeline", t));
             }
             let offset = case_index % modes.len();
             modes.rotate_left(offset);
@@ -546,7 +590,18 @@ fn main() -> Result<()> {
         report.push_str(" Also includes the `spawn_blocking` backend connect mode.");
     }
     if cfg!(windows) && !cfg!(feature = "tcp-profile") {
-        report.push_str(" Also includes the experimental Windows RIO relay.");
+        report.push_str(" Also includes the experimental Windows RIO relay and a two-slot, 32 KiB Tokio pipeline with blocking-pool backend connect.");
+    }
+    for name in [
+        "OI_COPY_SOCKET_BUFFER_KIB",
+        "OI_COPY_RECV_BUFFER_KIB",
+        "OI_COPY_SEND_BUFFER_KIB",
+        "OI_COPY_CLIENT_RECV_BUFFER_KIB",
+        "OI_COPY_BACKEND_RECV_BUFFER_KIB",
+    ] {
+        if let Ok(value) = std::env::var(name) {
+            report.push_str(&format!(" {name}={value}."));
+        }
     }
     report.push_str(" All traffic uses 127.0.0.1. HTTP and HTTPS clients use blocking TCP connect in every mode; HTTPS uses TLS 1.3 through the proxy. Fresh cases include connection and TLS handshake; keepalive cases exclude setup with one warmup request per client. Each proxy runs in a separate process.\n\n");
     report.push_str("| Workload | Clients | Mode | Requests | p50 (µs) | p95 (µs) | p99 (µs) | Max (µs) | Requests/s |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");

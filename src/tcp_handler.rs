@@ -27,23 +27,238 @@ async fn copy_tcp_streams(
     client: &mut TcpStream,
     backend: &mut TcpStream,
 ) -> io::Result<(u64, u64)> {
-    static FIXED_SIZE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-    let fixed_size =
-        *FIXED_SIZE.get_or_init(|| match std::env::var("OI_COPY_BUFFER_MODE").as_deref() {
-            Ok("fixed-8k") => Some(8 * 1024),
-            Ok("fixed-16k") => Some(16 * 1024),
-            Ok("fixed-32k") => Some(32 * 1024),
-            _ => None,
-        });
-    if let Some(size) = fixed_size {
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Adaptive,
+        Fixed(usize),
+        Pipeline,
+    }
+    static MODE: std::sync::OnceLock<Mode> = std::sync::OnceLock::new();
+    let mode = *MODE.get_or_init(|| match std::env::var("OI_COPY_BUFFER_MODE").as_deref() {
+        Ok("fixed-8k") => Mode::Fixed(8 * 1024),
+        Ok("fixed-16k") => Mode::Fixed(16 * 1024),
+        Ok("fixed-32k") => Mode::Fixed(32 * 1024),
+        Ok("pipeline-32k") => Mode::Pipeline,
+        _ => Mode::Adaptive,
+    });
+    let common = socket_buffer_override("OI_COPY_SOCKET_BUFFER_KIB");
+    let receive = socket_buffer_override("OI_COPY_RECV_BUFFER_KIB").or(common);
+    let send = socket_buffer_override("OI_COPY_SEND_BUFFER_KIB").or(common);
+    let client_receive = socket_buffer_override("OI_COPY_CLIENT_RECV_BUFFER_KIB").or(receive);
+    let backend_receive = socket_buffer_override("OI_COPY_BACKEND_RECV_BUFFER_KIB").or(receive);
+    if client_receive.is_some() || backend_receive.is_some() || send.is_some() {
+        for (socket, receive) in [(&*client, client_receive), (&*backend, backend_receive)] {
+            let socket = socket2::SockRef::from(socket);
+            if let Some(size) = receive {
+                socket.set_recv_buffer_size(size)?;
+            }
+            if let Some(size) = send {
+                socket.set_send_buffer_size(size)?;
+            }
+        }
+    }
+    if std::env::var_os("OI_COPY_TRACE").is_some() {
+        let client_socket = socket2::SockRef::from(&*client);
+        let backend_socket = socket2::SockRef::from(&*backend);
+        eprintln!(
+            "OI_COPY_TRACE sockets client_rcvbuf={:?} client_sndbuf={:?} backend_rcvbuf={:?} backend_sndbuf={:?}",
+            client_socket.recv_buffer_size(),
+            client_socket.send_buffer_size(),
+            backend_socket.recv_buffer_size(),
+            backend_socket.send_buffer_size()
+        );
+    }
+    if let Mode::Fixed(size) = mode {
         return io::copy_bidirectional_with_sizes(client, backend, size, size).await;
     }
     let (client_read, client_write) = client.split();
     let (backend_read, backend_write) = backend.split();
+    if std::env::var_os("OI_COPY_TRACE").is_some() {
+        return tokio::try_join!(
+            copy_tcp_direction_traced(
+                client_read,
+                backend_write,
+                matches!(mode, Mode::Pipeline),
+                "client->backend"
+            ),
+            copy_tcp_direction_traced(
+                backend_read,
+                client_write,
+                matches!(mode, Mode::Pipeline),
+                "backend->client"
+            )
+        );
+    }
+    if let Mode::Pipeline = mode {
+        return tokio::try_join!(
+            copy_tcp_direction_pipeline(client_read, backend_write),
+            copy_tcp_direction_pipeline(backend_read, client_write)
+        );
+    }
     tokio::try_join!(
         copy_tcp_direction(client_read, backend_write),
         copy_tcp_direction(backend_read, client_write)
     )
+}
+
+#[cfg(all(windows, not(feature = "tcp-profile")))]
+fn socket_buffer_override(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&kib| (64..=4096).contains(&kib))
+        .map(|kib| kib * 1024)
+}
+
+#[cfg(all(windows, not(feature = "tcp-profile")))]
+struct MeasuredRead<R> {
+    inner: R,
+    polls: u64,
+    pending: u64,
+    chunks: u64,
+    bytes: u64,
+}
+
+#[cfg(all(windows, not(feature = "tcp-profile")))]
+impl<R: AsyncRead + Unpin> AsyncRead for MeasuredRead<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        self.polls += 1;
+        let before = buf.filled().len();
+        let result = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        match &result {
+            std::task::Poll::Pending => self.pending += 1,
+            std::task::Poll::Ready(Ok(())) => {
+                let size = buf.filled().len() - before;
+                if size != 0 {
+                    self.chunks += 1;
+                    self.bytes += size as u64;
+                }
+            }
+            _ => {}
+        }
+        result
+    }
+}
+
+#[cfg(all(windows, not(feature = "tcp-profile")))]
+struct MeasuredWrite<W> {
+    inner: W,
+    polls: u64,
+    pending: u64,
+    chunks: u64,
+    bytes: u64,
+}
+
+#[cfg(all(windows, not(feature = "tcp-profile")))]
+impl<W: AsyncWrite + Unpin> AsyncWrite for MeasuredWrite<W> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        self.polls += 1;
+        let result = std::pin::Pin::new(&mut self.inner).poll_write(cx, buf);
+        match &result {
+            std::task::Poll::Pending => self.pending += 1,
+            std::task::Poll::Ready(Ok(size)) if *size != 0 => {
+                self.chunks += 1;
+                self.bytes += *size as u64;
+            }
+            _ => {}
+        }
+        result
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(all(windows, not(feature = "tcp-profile")))]
+async fn copy_tcp_direction_traced<R, W>(
+    reader: R,
+    writer: W,
+    pipeline: bool,
+    direction: &str,
+) -> io::Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut reader = MeasuredRead {
+        inner: reader,
+        polls: 0,
+        pending: 0,
+        chunks: 0,
+        bytes: 0,
+    };
+    let mut writer = MeasuredWrite {
+        inner: writer,
+        polls: 0,
+        pending: 0,
+        chunks: 0,
+        bytes: 0,
+    };
+    let result = if pipeline {
+        copy_tcp_direction_pipeline(&mut reader, &mut writer).await
+    } else {
+        copy_tcp_direction(&mut reader, &mut writer).await
+    };
+    eprintln!(
+        "OI_COPY_TRACE {direction} read_bytes={} read_chunks={} read_polls={} read_pending={} write_bytes={} write_chunks={} write_polls={} write_pending={}",
+        reader.bytes,
+        reader.chunks,
+        reader.polls,
+        reader.pending,
+        writer.bytes,
+        writer.chunks,
+        writer.polls,
+        writer.pending
+    );
+    result
+}
+
+#[cfg(all(windows, not(feature = "tcp-profile")))]
+async fn copy_tcp_direction_pipeline<R, W>(mut reader: R, mut writer: W) -> io::Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    const BLOCK: usize = 32 * 1024;
+    let mut first = vec![0; BLOCK];
+    let mut second = vec![0; BLOCK];
+    let mut size = reader.read(&mut first).await?;
+    let mut send_first = true;
+    let mut total = 0u64;
+    while size != 0 {
+        total += size as u64;
+        size = if send_first {
+            let (next, ()) =
+                tokio::try_join!(reader.read(&mut second), writer.write_all(&first[..size]))?;
+            next
+        } else {
+            let (next, ()) =
+                tokio::try_join!(reader.read(&mut first), writer.write_all(&second[..size]))?;
+            next
+        };
+        send_first = !send_first;
+    }
+    writer.shutdown().await?;
+    Ok(total)
 }
 
 #[cfg(windows)]
