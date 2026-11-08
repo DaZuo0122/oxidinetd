@@ -27,6 +27,17 @@ async fn copy_tcp_streams(
     client: &mut TcpStream,
     backend: &mut TcpStream,
 ) -> io::Result<(u64, u64)> {
+    static FIXED_SIZE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let fixed_size =
+        *FIXED_SIZE.get_or_init(|| match std::env::var("OI_COPY_BUFFER_MODE").as_deref() {
+            Ok("fixed-8k") => Some(8 * 1024),
+            Ok("fixed-16k") => Some(16 * 1024),
+            Ok("fixed-32k") => Some(32 * 1024),
+            _ => None,
+        });
+    if let Some(size) = fixed_size {
+        return io::copy_bidirectional_with_sizes(client, backend, size, size).await;
+    }
     let (client_read, client_write) = client.split();
     let (backend_read, backend_write) = backend.split();
     tokio::try_join!(
