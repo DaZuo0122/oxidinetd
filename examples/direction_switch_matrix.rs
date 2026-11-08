@@ -11,14 +11,10 @@ use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
-const MODES: [&str; 6] = [
-    "adaptive",
-    "fixed-8k",
-    "fixed-16k",
-    "fixed-32k",
-    "rio",
-    "tokio-pipeline",
-];
+#[cfg(windows)]
+const MODES: [&str; 5] = ["adaptive", "fixed-8k", "fixed-16k", "fixed-32k", "rio"];
+#[cfg(not(windows))]
+const MODES: [&str; 4] = ["adaptive", "fixed-8k", "fixed-16k", "fixed-32k"];
 
 struct Guard(Child);
 impl Drop for Guard {
@@ -109,12 +105,8 @@ fn proxy(
         .stderr(Stdio::null());
     command.env_remove("OI_COPY_BUFFER_MODE");
     command.env_remove("OI_RELAY_BACKEND");
-    command.env_remove("OI_BACKEND_CONNECT_MODE");
     if mode == "rio" {
         command.env("OI_RELAY_BACKEND", "rio");
-    } else if mode == "tokio-pipeline" {
-        command.env("OI_COPY_BUFFER_MODE", "pipeline-32k");
-        command.env("OI_BACKEND_CONNECT_MODE", "blocking-pool");
     } else if mode != "adaptive" {
         command.env("OI_COPY_BUFFER_MODE", mode);
     }

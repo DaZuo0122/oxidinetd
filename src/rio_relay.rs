@@ -201,15 +201,6 @@ async fn relay(client: Socket, address: &str, options: RioOptions) -> io::Result
     if options.nodelay {
         backend.set_tcp_nodelay(true)?;
     }
-    if std::env::var_os("OI_RIO_TRACE").is_some() {
-        eprintln!(
-            "OI_RIO_TRACE sockets client_rcvbuf={:?} client_sndbuf={:?} backend_rcvbuf={:?} backend_sndbuf={:?}",
-            client.recv_buffer_size(),
-            client.send_buffer_size(),
-            backend.recv_buffer_size(),
-            backend.send_buffer_size()
-        );
-    }
     let mut session = RioSession::new(client, backend, options.block)?;
     session.run().await
 }
@@ -368,10 +359,6 @@ struct Direction {
     ready: Option<(usize, u32)>,
     eof: bool,
     shut_down: bool,
-    recv_count: u64,
-    recv_bytes: u64,
-    send_count: u64,
-    send_bytes: u64,
 }
 
 impl Direction {
@@ -456,10 +443,6 @@ impl Direction {
             return Err(io::Error::other("unexpected RIO receive completion"));
         }
         self.receiving = None;
-        if bytes != 0 {
-            self.recv_count += 1;
-            self.recv_bytes += bytes as u64;
-        }
         if bytes == 0 {
             self.eof = true;
         } else if self.sending.is_none() {
@@ -489,8 +472,6 @@ impl Direction {
             return Err(io::Error::other("invalid RIO send completion"));
         }
         let sent = sent + bytes;
-        self.send_count += 1;
-        self.send_bytes += bytes as u64;
         if sent < len {
             self.post_send(api, slot, len, sent, outstanding)?;
         } else {
@@ -577,10 +558,6 @@ async fn relay_with_queue_body(session: &mut RioSession) -> io::Result<()> {
         ready: None,
         eof: false,
         shut_down: false,
-        recv_count: 0,
-        recv_bytes: 0,
-        send_count: 0,
-        send_bytes: 0,
     };
     let mut backend_to_client = Direction {
         source_rq: backend_rq,
@@ -594,24 +571,17 @@ async fn relay_with_queue_body(session: &mut RioSession) -> io::Result<()> {
         ready: None,
         eof: false,
         shut_down: false,
-        recv_count: 0,
-        recv_bytes: 0,
-        send_count: 0,
-        send_bytes: 0,
     };
     client_to_backend.refill(api, outstanding)?;
     backend_to_client.refill(api, outstanding)?;
     let mut results = [RIORESULT::default(); 8];
     let mut observed_notification = notification.generation.load(Ordering::Acquire);
-    let mut waits = 0u64;
-    let mut dequeue_batches = 0u64;
     while !client_to_backend.shut_down || !backend_to_client.shut_down {
         let count = unsafe { dequeue(cq, results.as_mut_ptr(), results.len() as u32) };
         if count == RIO_CORRUPT_CQ {
             return Err(io::Error::other("RIO completion queue corrupted"));
         }
         if count == 0 {
-            waits += 1;
             if unsafe { notify(cq) } != 0 {
                 return Err(wsa_error());
             }
@@ -627,7 +597,6 @@ async fn relay_with_queue_body(session: &mut RioSession) -> io::Result<()> {
             ));
         }
         *outstanding -= count;
-        dequeue_batches += 1;
         for result in results.iter().take(count as usize) {
             if result.Status != 0 {
                 return Err(io::Error::from_raw_os_error(result.Status));
@@ -655,26 +624,6 @@ async fn relay_with_queue_body(session: &mut RioSession) -> io::Result<()> {
                 _ => return Err(io::Error::other("unknown RIO completion")),
             }
         }
-    }
-    if std::env::var_os("OI_RIO_TRACE").is_some() {
-        eprintln!(
-            "OI_RIO_TRACE client->backend recv_bytes={} recv_chunks={} send_bytes={} send_chunks={} waits={} batches={}",
-            client_to_backend.recv_bytes,
-            client_to_backend.recv_count,
-            client_to_backend.send_bytes,
-            client_to_backend.send_count,
-            waits,
-            dequeue_batches
-        );
-        eprintln!(
-            "OI_RIO_TRACE backend->client recv_bytes={} recv_chunks={} send_bytes={} send_chunks={} waits={} batches={}",
-            backend_to_client.recv_bytes,
-            backend_to_client.recv_count,
-            backend_to_client.send_bytes,
-            backend_to_client.send_count,
-            waits,
-            dequeue_batches
-        );
     }
     Ok(())
 }
@@ -729,7 +678,62 @@ fn drain_completions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{TcpListener, TcpStream};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forwards_response_after_client_half_close() {
+        let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+        let backend_addr = backend.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = backend.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            std::io::Read::read_to_end(&mut stream, &mut request).unwrap();
+            assert_eq!(request, b"request");
+            std::io::Write::write_all(&mut stream, b"response").unwrap();
+            stream.shutdown(Shutdown::Write).unwrap();
+        });
+
+        let listener = rio_socket("127.0.0.1:0".parse().unwrap()).unwrap();
+        listener
+            .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
+            .unwrap();
+        listener.listen(1).unwrap();
+        let listen_addr = listener.local_addr().unwrap().as_socket().unwrap();
+        let mut client = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+        let accepted = listener.accept().unwrap().0;
+        let relay_task = tokio::spawn(async move {
+            relay(
+                accepted,
+                &backend_addr,
+                RioOptions {
+                    block: DEFAULT_BLOCK,
+                    nodelay: false,
+                },
+            )
+            .await
+        });
+        client.write_all(b"request").await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response, b"response");
+        tokio::time::timeout(Duration::from_secs(5), relay_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        server.join().unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancellation_drains_pending_receives() {

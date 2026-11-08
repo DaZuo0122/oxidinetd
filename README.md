@@ -12,7 +12,7 @@ A modern, lightweight port forwarding tool written in Rust, inspired by rinetd. 
 - **TOML Configuration**: Modern, human-readable configuration format
 - **Legacy Compatibility**: Supports original rinetd .conf format
 - **Access Control**: IP-based allow/deny rules
-- **Lightweight**: Built with Smol async runtime for minimal overhead
+- **Lightweight**: Built with the Tokio async runtime
 - **Cross-Platform**: Runs on Linux, macOS, and Windows
 
 ## Installation
@@ -155,6 +155,12 @@ cargo test
 ```
 
 See [TESTING.md](TESTING.md) for more details about the test suite.
+
+### Windows RIO experiment
+
+On Windows, set `OI_RELAY_BACKEND=rio` to use the optional Registered I/O relay for TCP forwarding. Other protocols continue to use their usual handlers. The Tokio relay remains the default. RIO uses two 32 KiB buffers per traffic direction by default; `OI_RIO_BUFFER_KIB` accepts values from 8 to 256, and `OI_RIO_NODELAY=1` enables TCP_NODELAY on both sockets.
+
+The network workload matrix compares the default relay and RIO using HTTP, HTTPS, and, when `IPERF3` points to an iperf3 executable, sustained TCP throughput. On Windows, run `scripts/run-network-matrix.ps1 -Production`. Results are written to `target/network-workload-matrix.md` by default. This backend is still experimental; benchmark it on the intended machine and workload before selecting it.
 
 ## Building
 
