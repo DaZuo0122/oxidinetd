@@ -289,8 +289,8 @@ fn start_proxy(binary: &Path, config: &Path, mode: &str, first_port: u16) -> Res
     } else {
         command.env_remove("OI_PROFILE_BLOCKING_POOL_CONNECT");
     }
-    if mode == "rio" {
-        command.env("OI_RELAY_BACKEND", "rio");
+    if mode == "rio" || mode == "splice" {
+        command.env("OI_RELAY_BACKEND", mode);
     }
     let mut child = ChildGuard(command.spawn()?);
     wait_for_port(first_port, &mut child.0)?;
@@ -338,6 +338,13 @@ fn proxy_binary() -> Result<PathBuf> {
 }
 
 fn main() -> Result<()> {
+    let native_mode = if cfg!(windows) {
+        "rio"
+    } else if cfg!(target_os = "linux") {
+        "splice"
+    } else {
+        ""
+    };
     let output = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "target/network-workload-matrix.md".into());
@@ -379,9 +386,9 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let rio_http = reserve_port()?;
-    let rio_https = reserve_port()?;
-    let rio_iperf = if iperf.is_some() {
+    let native_http = reserve_port()?;
+    let native_https = reserve_port()?;
+    let native_iperf = if iperf.is_some() {
         Some(reserve_port()?)
     } else {
         None
@@ -389,7 +396,7 @@ fn main() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let async_config = temporary.path().join("async.toml");
     let pool_config = temporary.path().join("pool.toml");
-    let rio_config = temporary.path().join("rio.toml");
+    let native_config = temporary.path().join("native.toml");
     let mut async_rules = vec![
         (async_http, http.addr.port()),
         (async_https, https.addr.port()),
@@ -398,17 +405,20 @@ fn main() -> Result<()> {
         (pool_http, http.addr.port()),
         (pool_https, https.addr.port()),
     ];
-    let mut rio_rules = vec![(rio_http, http.addr.port()), (rio_https, https.addr.port())];
+    let mut native_rules = vec![
+        (native_http, http.addr.port()),
+        (native_https, https.addr.port()),
+    ];
     if let (Some(backend), Some(a), Some(p)) = (iperf_port, async_iperf, pool_iperf) {
         async_rules.push((a, backend));
         pool_rules.push((p, backend));
     }
-    if let (Some(backend), Some(port)) = (iperf_port, rio_iperf) {
-        rio_rules.push((port, backend));
+    if let (Some(backend), Some(port)) = (iperf_port, native_iperf) {
+        native_rules.push((port, backend));
     }
     write_config(&async_config, &async_rules)?;
     write_config(&pool_config, &pool_rules)?;
-    write_config(&rio_config, &rio_rules)?;
+    write_config(&native_config, &native_rules)?;
     let _async_proxy = start_proxy(&binary, &async_config, "async", async_http)?;
     let _pool_proxy = if cfg!(feature = "tcp-profile") || cfg!(windows) {
         Some(start_proxy(
@@ -420,8 +430,13 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let _rio_proxy = if cfg!(windows) && !cfg!(feature = "tcp-profile") {
-        Some(start_proxy(&binary, &rio_config, "rio", rio_http)?)
+    let _native_proxy = if !native_mode.is_empty() && !cfg!(feature = "tcp-profile") {
+        Some(start_proxy(
+            &binary,
+            &native_config,
+            native_mode,
+            native_http,
+        )?)
     } else {
         None
     };
@@ -503,15 +518,17 @@ fn main() -> Result<()> {
             [127, 0, 0, 1],
             if case.tls { pool_https } else { pool_http },
         ));
-        let rio_addr =
-            SocketAddr::from(([127, 0, 0, 1], if case.tls { rio_https } else { rio_http }));
+        let native_addr = SocketAddr::from((
+            [127, 0, 0, 1],
+            if case.tls { native_https } else { native_http },
+        ));
         let tls = case.tls.then(|| tls_client.clone());
         let mut modes = vec![("direct", backend), ("async", async_addr)];
         if cfg!(feature = "tcp-profile") || cfg!(windows) {
             modes.push(("blocking-pool", pool_addr));
         }
-        if cfg!(windows) && !cfg!(feature = "tcp-profile") {
-            modes.push(("rio", rio_addr));
+        if !native_mode.is_empty() && !cfg!(feature = "tcp-profile") {
+            modes.push((native_mode, native_addr));
         }
         let offset = case_index % modes.len();
         modes.rotate_left(offset);
@@ -521,16 +538,16 @@ fn main() -> Result<()> {
         }
     }
     let mut iperf_results = Vec::new();
-    if let (Some(path), Some(backend), Some(a), Some(p), Some(r)) =
-        (&iperf, iperf_port, async_iperf, pool_iperf, rio_iperf)
+    if let (Some(path), Some(backend), Some(a), Some(p), Some(n)) =
+        (&iperf, iperf_port, async_iperf, pool_iperf, native_iperf)
     {
         for (case_index, parallel) in [1, 4].into_iter().enumerate() {
             let mut modes = vec![("direct", backend), ("async", a)];
             if cfg!(feature = "tcp-profile") || cfg!(windows) {
                 modes.push(("blocking-pool", p));
             }
-            if cfg!(windows) && !cfg!(feature = "tcp-profile") {
-                modes.push(("rio", r));
+            if !native_mode.is_empty() && !cfg!(feature = "tcp-profile") {
+                modes.push((native_mode, n));
             }
             let offset = case_index % modes.len();
             modes.rotate_left(offset);
@@ -547,6 +564,9 @@ fn main() -> Result<()> {
     }
     if cfg!(windows) && !cfg!(feature = "tcp-profile") {
         report.push_str(" Also includes the experimental Windows RIO relay.");
+    }
+    if cfg!(target_os = "linux") && !cfg!(feature = "tcp-profile") {
+        report.push_str(" Also includes the experimental Linux splice relay.");
     }
     report.push_str(" All traffic uses 127.0.0.1. HTTP and HTTPS clients use blocking TCP connect in every mode; HTTPS uses TLS 1.3 through the proxy. Fresh cases include connection and TLS handshake; keepalive cases exclude setup with one warmup request per client. Each proxy runs in a separate process.\n\n");
     report.push_str("| Workload | Clients | Mode | Requests | p50 (µs) | p95 (µs) | p99 (µs) | Max (µs) | Requests/s |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");

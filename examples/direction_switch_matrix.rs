@@ -1,4 +1,4 @@
-//! Windows TCP relay benchmark: repeated download/upload reversals on one connection.
+//! TCP relay benchmark: repeated download/upload reversals on one connection.
 //! Build the production `oi` binary and this example with matching features.
 
 use std::error::Error;
@@ -13,8 +13,10 @@ use std::time::{Duration, Instant};
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 #[cfg(windows)]
 const MODES: [&str; 5] = ["adaptive", "fixed-8k", "fixed-16k", "fixed-32k", "rio"];
-#[cfg(not(windows))]
-const MODES: [&str; 4] = ["adaptive", "fixed-8k", "fixed-16k", "fixed-32k"];
+#[cfg(target_os = "linux")]
+const MODES: [&str; 2] = ["adaptive", "splice"];
+#[cfg(not(any(windows, target_os = "linux")))]
+const MODES: [&str; 1] = ["adaptive"];
 
 struct Guard(Child);
 impl Drop for Guard {
@@ -105,8 +107,8 @@ fn proxy(
         .stderr(Stdio::null());
     command.env_remove("OI_COPY_BUFFER_MODE");
     command.env_remove("OI_RELAY_BACKEND");
-    if mode == "rio" {
-        command.env("OI_RELAY_BACKEND", "rio");
+    if mode == "rio" || mode == "splice" {
+        command.env("OI_RELAY_BACKEND", mode);
     } else if mode != "adaptive" {
         command.env("OI_COPY_BUFFER_MODE", mode);
     }
