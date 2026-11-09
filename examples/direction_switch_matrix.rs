@@ -240,8 +240,8 @@ fn case(
 }
 
 fn main() -> Result<()> {
-    if !cfg!(windows) {
-        return Err("this experiment requires Windows".into());
+    if !cfg!(any(windows, target_os = "linux")) {
+        return Err("this experiment requires Windows or Linux".into());
     }
     let output = std::env::args()
         .nth(1)
@@ -252,7 +252,7 @@ fn main() -> Result<()> {
         .parent()
         .ok_or("release directory missing")?
         .to_path_buf();
-    let binary = release.join("oi.exe");
+    let binary = release.join(if cfg!(windows) { "oi.exe" } else { "oi" });
     if !binary.is_file() {
         return Err(format!("build {} first", binary.display()).into());
     }
@@ -285,7 +285,7 @@ fn main() -> Result<()> {
         }
     }
     let mut report = String::from(
-        "# Direction-switch TCP relay matrix (Windows)\n\nEach client keeps one connection and repeats four downloads followed by four uploads, with one unmeasured warmup cycle. The first transfer after each reversal is reported separately from the following three. Buffers start at 8 KiB in adaptive mode. All payloads are checked for corruption. Numbers are local single-run measurements.\n\n| Payload | Clients | Mode | Phase | p50 (µs) | p95 (µs) | MiB/s at p50 |\n| ---: | ---: | --- | --- | ---: | ---: | ---: |\n",
+        "# Direction-switch TCP relay matrix\n\nEach client keeps one connection and repeats four downloads followed by four uploads, with one unmeasured warmup cycle. The first transfer after each reversal is reported separately from the following three. All payloads are checked for corruption. Numbers are local single-run measurements.\n\n| Payload | Clients | Mode | Phase | p50 (µs) | p95 (µs) | MiB/s at p50 |\n| ---: | ---: | --- | --- | ---: | ---: | ---: |\n",
     );
     for row in rows {
         report.push_str(&format!(
