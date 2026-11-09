@@ -104,6 +104,10 @@ async fn copy_direction(source: &TcpStream, destination: &TcpStream) -> io::Resu
 }
 
 async fn relay(client: TcpStream, backend: TcpStream) -> io::Result<(u64, u64)> {
+    if std::env::var("OI_TCP_NODELAY").as_deref() == Ok("1") {
+        client.set_nodelay(true)?;
+        backend.set_nodelay(true)?;
+    }
     tokio::try_join!(
         copy_direction(&client, &backend),
         copy_direction(&backend, &client)

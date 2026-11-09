@@ -162,6 +162,11 @@ pub async fn handle_tcp_connection(
             #[cfg(feature = "tcp-profile")]
             crate::tcp_profile::emit(profile_addr, crate::tcp_profile::Stage::BackendConnected);
 
+            if std::env::var("OI_TCP_NODELAY").as_deref() == Ok("1") {
+                client_stream.set_nodelay(true)?;
+                server_stream.set_nodelay(true)?;
+            }
+
             #[cfg(not(feature = "tcp-profile"))]
             {
                 #[cfg(windows)]

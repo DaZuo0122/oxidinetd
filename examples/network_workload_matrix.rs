@@ -568,6 +568,9 @@ fn main() -> Result<()> {
     if cfg!(target_os = "linux") && !cfg!(feature = "tcp-profile") {
         report.push_str(" Also includes the experimental Linux splice relay.");
     }
+    if let Ok(value) = std::env::var("OI_TCP_NODELAY") {
+        report.push_str(&format!(" OI_TCP_NODELAY={value}."));
+    }
     report.push_str(" All traffic uses 127.0.0.1. HTTP and HTTPS clients use blocking TCP connect in every mode; HTTPS uses TLS 1.3 through the proxy. Fresh cases include connection and TLS handshake; keepalive cases exclude setup with one warmup request per client. Each proxy runs in a separate process.\n\n");
     report.push_str("| Workload | Clients | Mode | Requests | p50 (µs) | p95 (µs) | p99 (µs) | Max (µs) | Requests/s |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");
     for row in results {
