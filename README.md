@@ -162,6 +162,12 @@ On Windows, set `OI_RELAY_BACKEND=rio` to use the optional Registered I/O relay 
 
 The network workload matrix compares the default relay and RIO using HTTP, HTTPS, and, when `IPERF3` points to an iperf3 executable, sustained TCP throughput. On Windows, run `scripts/run-network-matrix.ps1 -Production`. Results are written to `target/network-workload-matrix.md` by default. This backend is still experimental; benchmark it on the intended machine and workload before selecting it.
 
+### Linux splice experiment
+
+On Linux, set `OI_RELAY_BACKEND=splice` to use the optional TCP relay backed by nonblocking `splice` calls and a pipe for each traffic direction. Other protocols continue to use their usual handlers, and the Tokio relay remains the default. `OI_TCP_NODELAY=1` enables TCP_NODELAY on both proxy sockets for either TCP relay backend. Benchmark this setting on the intended workload: it can reduce request-response delays while changing packet behavior.
+
+On Linux, `scripts/run-network-matrix.sh --production` compares the default and splice relays. Set `IPERF3` to the iperf3 executable path to include sustained TCP throughput.
+
 ## Building
 
 ### Development Build
