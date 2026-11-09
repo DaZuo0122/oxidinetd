@@ -39,6 +39,9 @@ winapi = { version = "0.3.9", features = ["winbase", "processthreadsapi", "handl
 socket2 = { version = "0.6.5", features = ["all"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_System_IO", "Win32_System_Threading"] }
 
+[target."cfg(target_os = \"linux\")".dependencies]
+libc = "0.2.191"
+
 [target."cfg(unix)".dev-dependencies]
 libc = "0.2.191"
 

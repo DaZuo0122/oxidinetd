@@ -245,6 +245,12 @@ pub async fn start_tcp_forwarding(
     {
         return Ok(crate::rio_relay::start(bind_addr, connect_addr).await?);
     }
+    #[cfg(target_os = "linux")]
+    if protocol == crate::config::Protocol::Tcp
+        && std::env::var("OI_RELAY_BACKEND").as_deref() == Ok("splice")
+    {
+        return Ok(crate::splice_relay::start(bind_addr, connect_addr).await?);
+    }
     let listener = TcpListener::bind(bind_addr).await?;
 
     loop {
