@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check all targets
+        run: cargo check --workspace --all-targets --locked
+      - name: Test default backend
+        run: cargo test --workspace --locked -- --test-threads=1
+      - name: Test Linux splice backend
+        if: runner.os == 'Linux'
+        env:
+          OI_RELAY_BACKEND: splice
+          OI_TCP_NODELAY: '1'
+        run: cargo test --test tcp_forwarding_tests --test tls_passthrough_tests --locked -- --test-threads=1
+      - name: Test Windows RIO backend
+        if: runner.os == 'Windows'
+        env:
+          OI_RELAY_BACKEND: rio
+          OI_TCP_NODELAY: '1'
+        run: cargo test --test tcp_forwarding_tests --test tls_passthrough_tests --locked -- --test-threads=1

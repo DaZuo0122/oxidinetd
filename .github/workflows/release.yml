@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test default backend
+        run: cargo test --workspace --locked -- --test-threads=1
+      - name: Test Linux splice backend
+        if: runner.os == 'Linux'
+        env:
+          OI_RELAY_BACKEND: splice
+          OI_TCP_NODELAY: '1'
+        run: cargo test --test tcp_forwarding_tests --test tls_passthrough_tests --locked -- --test-threads=1
+      - name: Test Windows RIO backend
+        if: runner.os == 'Windows'
+        env:
+          OI_RELAY_BACKEND: rio
+          OI_TCP_NODELAY: '1'
+        run: cargo test --test tcp_forwarding_tests --test tls_passthrough_tests --locked -- --test-threads=1
+      - name: Build release binary
+        run: cargo build --release --locked --bin oi
+      - name: Package Linux binary
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          tar -czf dist/oi-linux-x86_64.tar.gz -C target/release oi
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path target/release/oi.exe -DestinationPath dist/oi-windows-x86_64.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: oi-${{ runner.os }}-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: oi-*-x86_64
+          path: dist
+          merge-multiple: true
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+          fi

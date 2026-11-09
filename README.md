@@ -156,6 +156,21 @@ cargo test
 
 See [TESTING.md](TESTING.md) for more details about the test suite.
 
+### Local commands
+
+Install [just](https://just.systems/) and run `just --list` to see the common
+commands. `just check`, `just test`, `just clippy`, and `just build` cover the
+usual development workflow. `just compare`, `just network-matrix`,
+`just network-profile`, and `just direction-matrix` call the existing benchmark
+scripts. Set `IPERF3` to the executable path to include iperf3 in the network
+matrix. The scripts remain available directly when custom arguments are needed.
+
+GitHub Actions runs checks on Linux, Windows, and macOS. It also tests the
+experimental splice and RIO relays on their respective platforms. A `v*` tag
+builds and publishes Linux and Windows binaries as GitHub release assets. Each
+platform's experimental relay is already compiled into its binary; select it
+at runtime with `OI_RELAY_BACKEND=splice` or `OI_RELAY_BACKEND=rio`.
+
 ### Windows RIO experiment
 
 On Windows, set `OI_RELAY_BACKEND=rio` to use the optional Registered I/O relay for TCP forwarding. Other protocols continue to use their usual handlers. The Tokio relay remains the default. RIO uses two 32 KiB buffers per traffic direction by default; `OI_RIO_BUFFER_KIB` accepts values from 8 to 256, and `OI_RIO_NODELAY=1` enables TCP_NODELAY on both sockets.
