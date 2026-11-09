@@ -3,6 +3,11 @@ use std::net::SocketAddr;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
+pub(crate) fn tcp_nodelay_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("OI_TCP_NODELAY").as_deref() == Ok("1"))
+}
+
 #[cfg(any(not(windows), feature = "tcp-profile"))]
 async fn copy_tcp<A, B>(client: &mut A, backend: &mut B) -> io::Result<(u64, u64)>
 where
@@ -162,7 +167,7 @@ pub async fn handle_tcp_connection(
             #[cfg(feature = "tcp-profile")]
             crate::tcp_profile::emit(profile_addr, crate::tcp_profile::Stage::BackendConnected);
 
-            if std::env::var("OI_TCP_NODELAY").as_deref() == Ok("1") {
+            if tcp_nodelay_enabled() {
                 client_stream.set_nodelay(true)?;
                 server_stream.set_nodelay(true)?;
             }

@@ -285,8 +285,12 @@ fn main() -> Result<()> {
         }
     }
     let mut report = String::from(
-        "# Direction-switch TCP relay matrix\n\nEach client keeps one connection and repeats four downloads followed by four uploads, with one unmeasured warmup cycle. The first transfer after each reversal is reported separately from the following three. All payloads are checked for corruption. Numbers are local single-run measurements.\n\n| Payload | Clients | Mode | Phase | p50 (µs) | p95 (µs) | MiB/s at p50 |\n| ---: | ---: | --- | --- | ---: | ---: | ---: |\n",
+        "# Direction-switch TCP relay matrix\n\nEach client keeps one connection and repeats four downloads followed by four uploads, with one unmeasured warmup cycle. The first transfer after each reversal is reported separately from the following three. All payloads are checked for corruption. Numbers are local single-run measurements.\n\n",
     );
+    if let Ok(value) = std::env::var("OI_TCP_NODELAY") {
+        report.push_str(&format!("OI_TCP_NODELAY={value}.\n\n"));
+    }
+    report.push_str("| Payload | Clients | Mode | Phase | p50 (µs) | p95 (µs) | MiB/s at p50 |\n| ---: | ---: | --- | --- | ---: | ---: | ---: |\n");
     for row in rows {
         report.push_str(&format!(
             "| {} KiB | {} | {} | {} | {} | {} | {:.1} |\n",

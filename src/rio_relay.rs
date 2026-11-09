@@ -50,7 +50,7 @@ impl RioOptions {
             .map(|kib| kib * 1024)
             .unwrap_or(DEFAULT_BLOCK);
         let nodelay = std::env::var("OI_RIO_NODELAY").as_deref() == Ok("1")
-            || std::env::var("OI_TCP_NODELAY").as_deref() == Ok("1");
+            || crate::tcp_handler::tcp_nodelay_enabled();
         Self { block, nodelay }
     }
 }

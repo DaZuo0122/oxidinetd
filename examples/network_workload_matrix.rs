@@ -283,6 +283,7 @@ fn start_proxy(binary: &Path, config: &Path, mode: &str, first_port: u16) -> Res
     command.env_remove("OI_PROFILE_SYNC_BACKEND_CONNECT");
     command.env_remove("OI_BACKEND_CONNECT_MODE");
     command.env_remove("OI_RELAY_BACKEND");
+    command.env_remove("OI_COPY_BUFFER_MODE");
     if mode == "blocking-pool" {
         command.env("OI_PROFILE_BLOCKING_POOL_CONNECT", "1");
         command.env("OI_BACKEND_CONNECT_MODE", "blocking-pool");
@@ -338,12 +339,14 @@ fn proxy_binary() -> Result<PathBuf> {
 }
 
 fn main() -> Result<()> {
-    let native_mode = if cfg!(windows) {
-        "rio"
+    let native_mode = if cfg!(feature = "tcp-profile") {
+        None
+    } else if cfg!(windows) {
+        Some("rio")
     } else if cfg!(target_os = "linux") {
-        "splice"
+        Some("splice")
     } else {
-        ""
+        None
     };
     let output = std::env::args()
         .nth(1)
@@ -430,13 +433,8 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let _native_proxy = if !native_mode.is_empty() && !cfg!(feature = "tcp-profile") {
-        Some(start_proxy(
-            &binary,
-            &native_config,
-            native_mode,
-            native_http,
-        )?)
+    let _native_proxy = if let Some(mode) = native_mode {
+        Some(start_proxy(&binary, &native_config, mode, native_http)?)
     } else {
         None
     };
@@ -527,8 +525,8 @@ fn main() -> Result<()> {
         if cfg!(feature = "tcp-profile") || cfg!(windows) {
             modes.push(("blocking-pool", pool_addr));
         }
-        if !native_mode.is_empty() && !cfg!(feature = "tcp-profile") {
-            modes.push((native_mode, native_addr));
+        if let Some(mode) = native_mode {
+            modes.push((mode, native_addr));
         }
         let offset = case_index % modes.len();
         modes.rotate_left(offset);
@@ -546,8 +544,8 @@ fn main() -> Result<()> {
             if cfg!(feature = "tcp-profile") || cfg!(windows) {
                 modes.push(("blocking-pool", p));
             }
-            if !native_mode.is_empty() && !cfg!(feature = "tcp-profile") {
-                modes.push((native_mode, n));
+            if let Some(mode) = native_mode {
+                modes.push((mode, n));
             }
             let offset = case_index % modes.len();
             modes.rotate_left(offset);
